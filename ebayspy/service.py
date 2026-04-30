@@ -111,7 +111,14 @@ class EbaySpyService:
         total_alert_count = 0
         for seller_index, seller in enumerate(sellers):
             if seller_index and self.config.seller_check_delay_seconds > 0:
-                await asyncio.sleep(self.config.seller_check_delay_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self.stop_event.wait(),
+                        timeout=self.config.seller_check_delay_seconds,
+                    )
+                    break
+                except TimeoutError:
+                    pass
 
             seller_new_count = 0
             seller_ended_count = 0
