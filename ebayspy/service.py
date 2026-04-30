@@ -109,7 +109,10 @@ class EbaySpyService:
             log.warning("No Telegram chats configured yet. Send /start to the bot.")
 
         total_alert_count = 0
-        for seller in sellers:
+        for seller_index, seller in enumerate(sellers):
+            if seller_index and self.config.seller_check_delay_seconds > 0:
+                await asyncio.sleep(self.config.seller_check_delay_seconds)
+
             seller_new_count = 0
             seller_ended_count = 0
             try:

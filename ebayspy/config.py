@@ -41,6 +41,7 @@ class Config:
     ebay_global_id: str
     sqlite_path: Path
     poll_interval_seconds: int
+    seller_check_delay_seconds: int
     max_items_per_seller: int
     description_concurrency: int
     notify_existing_on_first_run: bool
@@ -64,6 +65,7 @@ class Config:
             ebay_global_id=os.getenv("EBAY_GLOBAL_ID", "EBAY-US").strip() or "EBAY-US",
             sqlite_path=Path(os.getenv("SQLITE_PATH", "ebayspy.sqlite3")),
             poll_interval_seconds=_int_env("POLL_INTERVAL_SECONDS", 900),
+            seller_check_delay_seconds=_int_env("SELLER_CHECK_DELAY_SECONDS", 0),
             max_items_per_seller=_int_env("MAX_ITEMS_PER_SELLER", 20),
             description_concurrency=_int_env("DESCRIPTION_CONCURRENCY", 5),
             notify_existing_on_first_run=_bool_env("NOTIFY_EXISTING_ON_FIRST_RUN", False),

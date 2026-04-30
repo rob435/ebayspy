@@ -42,6 +42,7 @@ def _service_config() -> SimpleNamespace:
         telegram_allowed_chat_ids=(),
         telegram_allowed_usernames=(),
         notify_existing_on_first_run=False,
+        seller_check_delay_seconds=0,
     )
 
 
