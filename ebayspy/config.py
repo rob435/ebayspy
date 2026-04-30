@@ -37,6 +37,7 @@ class Config:
     telegram_allowed_chat_ids: tuple[str, ...]
     telegram_allowed_usernames: tuple[str, ...]
     ebay_app_id: str | None
+    ebay_client_secret: str | None
     ebay_global_id: str
     sqlite_path: Path
     poll_interval_seconds: int
@@ -52,12 +53,14 @@ class Config:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
         app_id = os.getenv("EBAY_APP_ID", "").strip() or None
+        client_secret = os.getenv("EBAY_CLIENT_SECRET", "").strip() or None
         return cls(
             telegram_bot_token=token,
             telegram_chat_id=chat_id,
             telegram_allowed_chat_ids=tuple(_csv_env("TELEGRAM_ALLOWED_CHAT_IDS")),
             telegram_allowed_usernames=tuple(_username_env("TELEGRAM_ALLOWED_USERNAMES")),
             ebay_app_id=app_id,
+            ebay_client_secret=client_secret,
             ebay_global_id=os.getenv("EBAY_GLOBAL_ID", "EBAY-US").strip() or "EBAY-US",
             sqlite_path=Path(os.getenv("SQLITE_PATH", "ebayspy.sqlite3")),
             poll_interval_seconds=_int_env("POLL_INTERVAL_SECONDS", 900),

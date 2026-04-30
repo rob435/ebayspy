@@ -27,6 +27,7 @@ class EbaySpyService:
         self.store = Store(config.sqlite_path)
         self.ebay = EbayClient(
             app_id=config.ebay_app_id,
+            client_secret=config.ebay_client_secret,
             global_id=config.ebay_global_id,
             timeout_seconds=config.http_timeout_seconds,
             max_items=config.max_items_per_seller,

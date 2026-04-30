@@ -36,7 +36,8 @@ Edit `.env`:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:your_bot_token
-EBAY_APP_ID=your_ebay_app_id_optional_but_recommended
+EBAY_APP_ID=your_ebay_client_id_optional_but_recommended
+EBAY_CLIENT_SECRET=your_ebay_client_secret_optional_but_recommended
 SELLERS=seller_one,seller_two
 DESCRIPTION_CONCURRENCY=5
 ```
@@ -77,8 +78,9 @@ ebayspy status
 Use `systemd/ebayspy.service` as a template. Update `WorkingDirectory`, `EnvironmentFile`,
 and `ExecStart` for your server path.
 
-API mode with `EBAY_APP_ID` is recommended. Without it, ebayspy falls back to parsing public eBay
-search pages, which can break if eBay changes markup or rate-limits the VPS.
+OAuth Browse API mode with `EBAY_APP_ID` and `EBAY_CLIENT_SECRET` is recommended. Without it,
+ebayspy falls back to legacy eBay APIs and public eBay search pages, which can break if eBay
+changes markup or rate-limits the VPS.
 
 By default, the first scan seeds existing listings without alerting so you only get genuinely new
 items after the tracker starts. Set `NOTIFY_EXISTING_ON_FIRST_RUN=true` if you want the current

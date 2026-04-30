@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlencode
 
@@ -22,11 +24,15 @@ class EbayClient:
         timeout_seconds: int,
         max_items: int,
         description_concurrency: int = 5,
+        client_secret: str | None = None,
     ) -> None:
         self.app_id = app_id
+        self.client_secret = client_secret
         self.global_id = global_id
         self.max_items = max_items
         self.description_concurrency = max(1, description_concurrency)
+        self._oauth_token: str | None = None
+        self._oauth_token_expires_at = 0.0
         self.client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={
@@ -43,6 +49,16 @@ class EbayClient:
         await self.client.aclose()
 
     async def seller_listings(self, seller: str) -> list[Listing]:
+        if self.app_id and self.client_secret:
+            try:
+                return await self._seller_listings_browse(seller)
+            except Exception as exc:
+                log.warning(
+                    "eBay Browse API lookup failed for %s with %s; trying legacy fallback",
+                    seller,
+                    exc.__class__.__name__,
+                )
+
         api_error: Exception | None = None
         if self.app_id:
             try:
@@ -63,6 +79,15 @@ class EbayClient:
         return listings
 
     async def seller_exists(self, seller: str) -> bool | None:
+        if self.app_id and self.client_secret:
+            try:
+                return True if await self._seller_listings_browse(seller) else None
+            except Exception as exc:
+                log.warning(
+                    "Could not validate eBay seller %s with Browse API %s",
+                    seller,
+                    exc.__class__.__name__,
+                )
         if self.app_id:
             try:
                 return True if await self._seller_listings_api(seller) else None
@@ -102,6 +127,78 @@ class EbayClient:
             root.findtext(".//e:Seller/e:UserID", namespaces=ns)
             or root.findtext(".//Seller/UserID")
             or None
+        )
+
+    async def _oauth_access_token(self) -> str:
+        if self._oauth_token and time.time() < self._oauth_token_expires_at:
+            return self._oauth_token
+        if not self.app_id or not self.client_secret:
+            raise RuntimeError("EBAY_APP_ID and EBAY_CLIENT_SECRET are required for OAuth")
+
+        credentials = base64.b64encode(f"{self.app_id}:{self.client_secret}".encode()).decode()
+        response = await self.client.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "client_credentials",
+                "scope": "https://api.ebay.com/oauth/api_scope",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        token = str(payload["access_token"])
+        expires_in = int(payload.get("expires_in", 7200))
+        self._oauth_token = token
+        self._oauth_token_expires_at = time.time() + max(60, expires_in - 60)
+        return token
+
+    async def _seller_listings_browse(self, seller: str) -> list[Listing]:
+        token = await self._oauth_access_token()
+        response = await self.client.get(
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-EBAY-C-MARKETPLACE-ID": self._marketplace_id(),
+            },
+            params={
+                "filter": f"sellers:{{{seller}}}",
+                "sort": "newlyListed",
+                "limit": min(self.max_items, 200),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        listings = [
+            self._listing_from_browse_item(seller, item)
+            for item in payload.get("itemSummaries", [])
+        ]
+        return [listing for listing in listings if listing.item_id and listing.url]
+
+    def _listing_from_browse_item(self, seller: str, item: dict) -> Listing:
+        price = item.get("price") or {}
+        categories = item.get("categories") or []
+        seller_info = item.get("seller") or {}
+        item_id = (
+            str(item.get("legacyItemId") or "")
+            or self._extract_item_id(str(item.get("itemWebUrl") or ""))
+            or self._legacy_id_from_browse_id(str(item.get("itemId") or ""))
+        )
+        price_value = str(price.get("value") or "")
+        price_currency = str(price.get("currency") or "")
+        return Listing(
+            item_id=item_id,
+            seller=str(seller_info.get("username") or seller),
+            title=str(item.get("title") or "Untitled"),
+            price=f"{price_value} {price_currency}".strip(),
+            url=str(item.get("itemWebUrl") or ""),
+            listed_at=item.get("itemCreationDate") or item.get("itemOriginDate"),
+            image_url=(item.get("image") or {}).get("imageUrl"),
+            listing_type=", ".join(item.get("buyingOptions") or []),
+            category=str(categories[0].get("categoryName") or "") if categories else "",
+            quantity_available=self._availability_quantity(item),
         )
 
     async def _seller_listings_api(self, seller: str) -> list[Listing]:
@@ -265,6 +362,23 @@ class EbayClient:
         return " ".join(description.split())
 
     @staticmethod
+    def _availability_quantity(item: dict) -> str:
+        for availability in item.get("estimatedAvailabilities") or []:
+            quantity = availability.get("estimatedAvailableQuantity")
+            if quantity is not None:
+                return str(quantity)
+            threshold = availability.get("availabilityThreshold")
+            threshold_type = availability.get("availabilityThresholdType")
+            if threshold is not None and threshold_type:
+                return f"{str(threshold_type).replace('_', ' ').title()} {threshold}"
+        return ""
+
+    @staticmethod
+    def _legacy_id_from_browse_id(item_id: str) -> str:
+        match = re.search(r"\|(\d{9,})\|", item_id)
+        return match.group(1) if match else ""
+
+    @staticmethod
     def seller_url(seller: str) -> str:
         return f"https://www.ebay.com/sch/i.html?_ssn={quote_plus(seller)}&_sop=10"
 
@@ -280,3 +394,6 @@ class EbayClient:
             "EBAY-ES": "186",
         }
         return site_ids.get(self.global_id.upper(), "0")
+
+    def _marketplace_id(self) -> str:
+        return self.global_id.upper().replace("-", "_")

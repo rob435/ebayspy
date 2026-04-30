@@ -20,6 +20,43 @@ def test_clean_description_collapses_whitespace() -> None:
     assert EbayClient._clean_description("A   nice\n\nitem\tlisted today") == "A nice item listed today"
 
 
+def test_browse_item_maps_to_listing() -> None:
+    client = EbayClient(
+        app_id="appid",
+        client_secret="secret",
+        global_id="EBAY-US",
+        timeout_seconds=1,
+        max_items=20,
+    )
+    item = {
+        "legacyItemId": "123456789012",
+        "seller": {"username": "seller_one"},
+        "title": "Example",
+        "price": {"value": "10.00", "currency": "USD"},
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+        "itemCreationDate": "2026-04-30T12:00:00.000Z",
+        "image": {"imageUrl": "https://example.test/image.jpg"},
+        "buyingOptions": ["FIXED_PRICE"],
+        "categories": [{"categoryName": "Video Games"}],
+        "estimatedAvailabilities": [{"estimatedAvailableQuantity": 7}],
+    }
+    try:
+        listing = client._listing_from_browse_item("seller_one", item)
+
+        assert listing.item_id == "123456789012"
+        assert listing.seller == "seller_one"
+        assert listing.price == "10.00 USD"
+        assert listing.quantity_available == "7"
+        assert listing.listing_type == "FIXED_PRICE"
+        assert listing.category == "Video Games"
+    finally:
+        asyncio.run(client.close())
+
+
+def test_legacy_id_from_browse_id() -> None:
+    assert EbayClient._legacy_id_from_browse_id("v1|123456789012|0") == "123456789012"
+
+
 def test_seller_listings_raises_when_api_fails_and_fallback_is_empty() -> None:
     client = EbayClient(
         app_id="appid",
