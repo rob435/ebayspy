@@ -43,16 +43,24 @@ class EbayClient:
         await self.client.aclose()
 
     async def seller_listings(self, seller: str) -> list[Listing]:
+        api_error: Exception | None = None
         if self.app_id:
             try:
                 return await self._seller_listings_api(seller)
             except Exception as exc:
+                api_error = exc
                 log.warning(
                     "eBay API lookup failed for %s with %s; trying search-page fallback",
                     seller,
                     exc.__class__.__name__,
                 )
-        return await self._seller_listings_scrape(seller)
+        listings = await self._seller_listings_scrape(seller)
+        if api_error is not None and not listings:
+            raise RuntimeError(
+                "eBay API lookup failed and search-page fallback returned no listings; "
+                f"API error: {api_error}"
+            ) from api_error
+        return listings
 
     async def seller_exists(self, seller: str) -> bool | None:
         if self.app_id:
