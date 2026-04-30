@@ -1,0 +1,16 @@
+[Unit]
+Description=eBay seller Telegram tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ebayspy
+EnvironmentFile=/opt/ebayspy/.env
+ExecStart=/opt/ebayspy/.venv/bin/ebayspy run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
