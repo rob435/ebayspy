@@ -8,6 +8,7 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
 - Polls every 15 minutes by default.
 - Sends Telegram alerts with title, price, seller, description snippet, and item link.
 - Includes listing type, category, and quantity available when eBay returns them.
+- Alerts when eBay reports that an active listing's available quantity increased.
 - Alerts when a previously active watched item disappears, which usually means ended or sold.
 - Deduplicates items in SQLite so restarts do not resend old listings.
 - Lets you manage sellers from Telegram:
