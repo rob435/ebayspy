@@ -6,3 +6,5 @@ __pycache__/
 *.sqlite3
 *.sqlite3-*
 graphify-out/
+browser-profile/
+chrome-ebay-profile/

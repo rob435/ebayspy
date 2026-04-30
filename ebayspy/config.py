@@ -39,6 +39,10 @@ class Config:
     ebay_app_id: str | None
     ebay_client_secret: str | None
     ebay_global_id: str
+    ebay_browser_headless: bool
+    ebay_browser_profile_dir: Path | None
+    ebay_browser_executable_path: str | None
+    ebay_browser_block_wait_seconds: int
     sqlite_path: Path
     poll_interval_seconds: int
     seller_check_delay_seconds: int
@@ -63,6 +67,13 @@ class Config:
             ebay_app_id=app_id,
             ebay_client_secret=client_secret,
             ebay_global_id=os.getenv("EBAY_GLOBAL_ID", "EBAY-US").strip() or "EBAY-US",
+            ebay_browser_headless=_bool_env("EBAY_BROWSER_HEADLESS", True),
+            ebay_browser_profile_dir=(
+                Path(value) if (value := os.getenv("EBAY_BROWSER_PROFILE_DIR", "").strip()) else None
+            ),
+            ebay_browser_executable_path=os.getenv("EBAY_BROWSER_EXECUTABLE_PATH", "").strip()
+            or None,
+            ebay_browser_block_wait_seconds=_int_env("EBAY_BROWSER_BLOCK_WAIT_SECONDS", 0),
             sqlite_path=Path(os.getenv("SQLITE_PATH", "ebayspy.sqlite3")),
             poll_interval_seconds=_int_env("POLL_INTERVAL_SECONDS", 900),
             seller_check_delay_seconds=_int_env("SELLER_CHECK_DELAY_SECONDS", 0),

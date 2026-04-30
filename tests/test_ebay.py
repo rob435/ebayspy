@@ -57,41 +57,75 @@ def test_legacy_id_from_browse_id() -> None:
     assert EbayClient._legacy_id_from_browse_id("v1|123456789012|0") == "123456789012"
 
 
-def test_seller_listings_raises_when_api_fails_and_fallback_is_empty() -> None:
+def test_parse_seller_search_html_maps_cards_to_listings() -> None:
     client = EbayClient(
-        app_id="appid",
+        app_id=None,
         global_id="EBAY-US",
         timeout_seconds=1,
         max_items=20,
     )
-
-    async def api_error(seller: str) -> list[Listing]:
-        raise RuntimeError("rate limited")
-
-    async def empty_fallback(seller: str) -> list[Listing]:
-        return []
-
-    client._seller_listings_api = api_error
-    client._seller_listings_scrape = empty_fallback
+    html = """
+    <ul>
+      <li class="s-item">
+        <div class="s-item__title">Example Item</div>
+        <a class="s-item__link" href="https://www.ebay.com/itm/Example/123456789012"></a>
+        <span class="s-item__price">$10.00</span>
+        <span class="s-item__purchase-options">Buy It Now</span>
+        <div>3 available</div>
+        <div class="s-item__image"><img src="https://example.test/image.jpg"></div>
+      </li>
+      <li class="s-item">
+        <div class="s-item__title">Shop on eBay</div>
+        <a class="s-item__link" href="https://www.ebay.com/"></a>
+      </li>
+    </ul>
+    """
     try:
-        try:
-            asyncio.run(client.seller_listings("seller_one"))
-        except RuntimeError as exc:
-            assert "fallback returned no listings" in str(exc)
-        else:
-            raise AssertionError("expected seller_listings to raise")
+        listings = client._parse_seller_search_html("seller_one", html)
+
+        assert listings == [
+            Listing(
+                item_id="123456789012",
+                seller="seller_one",
+                title="Example Item",
+                price="$10.00",
+                url="https://www.ebay.com/itm/Example/123456789012",
+                image_url="https://example.test/image.jpg",
+                listing_type="Buy It Now",
+                quantity_available="3",
+            )
+        ]
     finally:
         asyncio.run(client.close())
 
 
-def test_seller_listings_uses_non_empty_fallback_after_api_error() -> None:
+def test_parse_seller_search_html_reports_block_page() -> None:
     client = EbayClient(
-        app_id="appid",
+        app_id=None,
         global_id="EBAY-US",
         timeout_seconds=1,
         max_items=20,
     )
-    fallback_listing = Listing(
+    try:
+        try:
+            client._parse_seller_search_html("seller_one", "<h1>Access Denied</h1>")
+        except RuntimeError as exc:
+            assert "blocked" in str(exc)
+        else:
+            raise AssertionError("expected block page to raise")
+    finally:
+        asyncio.run(client.close())
+
+
+def test_seller_listings_uses_browser_scraper_only() -> None:
+    client = EbayClient(
+        app_id="appid",
+        client_secret="secret",
+        global_id="EBAY-US",
+        timeout_seconds=1,
+        max_items=20,
+    )
+    browser_listing = Listing(
         item_id="123456789012",
         seller="seller_one",
         title="Example",
@@ -99,15 +133,17 @@ def test_seller_listings_uses_non_empty_fallback_after_api_error() -> None:
         url="https://example.test/itm/123456789012",
     )
 
+    async def browser_scrape(seller: str) -> list[Listing]:
+        return [browser_listing]
+
     async def api_error(seller: str) -> list[Listing]:
-        raise RuntimeError("rate limited")
+        raise AssertionError("API should not be called")
 
-    async def non_empty_fallback(seller: str) -> list[Listing]:
-        return [fallback_listing]
-
+    client._seller_listings_browser = browser_scrape
+    client._seller_listings_browse = api_error
     client._seller_listings_api = api_error
-    client._seller_listings_scrape = non_empty_fallback
+    client._seller_listings_scrape = api_error
     try:
-        assert asyncio.run(client.seller_listings("seller_one")) == [fallback_listing]
+        assert asyncio.run(client.seller_listings("seller_one")) == [browser_listing]
     finally:
         asyncio.run(client.close())

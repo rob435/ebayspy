@@ -32,6 +32,10 @@ class EbaySpyService:
             timeout_seconds=config.http_timeout_seconds,
             max_items=config.max_items_per_seller,
             description_concurrency=config.description_concurrency,
+            browser_headless=config.ebay_browser_headless,
+            browser_profile_dir=config.ebay_browser_profile_dir,
+            browser_executable_path=config.ebay_browser_executable_path,
+            browser_block_wait_seconds=config.ebay_browser_block_wait_seconds,
         )
         self.telegram = TelegramBot(config.telegram_bot_token, config.http_timeout_seconds)
         self.stop_event = asyncio.Event()

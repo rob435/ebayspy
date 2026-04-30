@@ -43,6 +43,10 @@ def _service_config() -> SimpleNamespace:
         telegram_allowed_usernames=(),
         notify_existing_on_first_run=False,
         seller_check_delay_seconds=0,
+        ebay_browser_headless=True,
+        ebay_browser_profile_dir=None,
+        ebay_browser_executable_path=None,
+        ebay_browser_block_wait_seconds=0,
     )
 
 
