@@ -43,10 +43,7 @@ def _service_config() -> SimpleNamespace:
         telegram_allowed_usernames=(),
         notify_existing_on_first_run=False,
         seller_check_delay_seconds=0,
-        ebay_browser_headless=True,
-        ebay_browser_profile_dir=None,
-        ebay_browser_executable_path=None,
-        ebay_browser_block_wait_seconds=0,
+        max_items_per_seller=20,
     )
 
 
@@ -74,6 +71,7 @@ def test_check_once_alerts_only_quantity_increases(tmp_path: Path) -> None:
     service.store = store
     service.telegram = FakeTelegram()
     service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
     try:
         store.add_seller("seller_one")
         previous_listings = [
@@ -153,3 +151,157 @@ def test_seed_seller_baseline_marks_current_items_seen(tmp_path: Path) -> None:
         assert store.seller_has_successful_check("seller_one")
     finally:
         store.close()
+
+
+def test_check_once_alerts_new_listing(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        existing = Listing(
+            item_id="111111111111",
+            seller="seller_one",
+            title="Existing",
+            price="GBP 5.00",
+            url="https://example.test/itm/111111111111",
+        )
+        store.mark_seen(existing, notified=False)
+        store.upsert_active_listings([existing])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+
+        fresh = Listing(
+            item_id="222222222222",
+            seller="seller_one",
+            title="Brand new",
+            price="GBP 9.00",
+            url="https://example.test/itm/222222222222",
+        )
+        service.ebay = FakeEbay([fresh, existing])
+
+        count = asyncio.run(service.check_once())
+
+        assert count == 1
+        assert service.telegram.listings == [("chat-1", "222222222222")]
+        assert service.telegram.ended == []
+    finally:
+        store.close()
+
+
+def test_check_once_skips_ended_detection_when_results_truncated(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.max_items_per_seller = 3
+    service.config = config
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        previous = [
+            Listing(
+                item_id=item_id,
+                seller="seller_one",
+                title=f"Item {item_id}",
+                price="GBP 1.00",
+                url=f"https://example.test/itm/{item_id}",
+            )
+            for item_id in ("100000000001", "100000000002", "100000000003", "100000000004")
+        ]
+        for listing in previous:
+            store.mark_seen(listing, notified=False)
+        store.upsert_active_listings(previous)
+        store.record_check("seller_one", listing_count=4, new_count=0)
+
+        # A full page (len == max_items) means the result is truncated: items 3 and 4
+        # are absent only because they fell off the page, not because they ended.
+        current = previous[:2] + [
+            Listing(
+                item_id="100000000005",
+                seller="seller_one",
+                title="Newest",
+                price="GBP 1.00",
+                url="https://example.test/itm/100000000005",
+            )
+        ]
+        service.ebay = FakeEbay(current)
+
+        asyncio.run(service.check_once())
+
+        assert service.telegram.ended == []
+        assert service.telegram.listings == [("chat-1", "100000000005")]
+    finally:
+        store.close()
+
+
+def test_check_once_alerts_ended_when_results_not_truncated(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.max_items_per_seller = 10
+    service.config = config
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        still_active = Listing(
+            item_id="100000000001",
+            seller="seller_one",
+            title="Still active",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000001",
+        )
+        gone = Listing(
+            item_id="100000000002",
+            seller="seller_one",
+            title="Now gone",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000002",
+        )
+        for listing in (still_active, gone):
+            store.mark_seen(listing, notified=False)
+        store.upsert_active_listings([still_active, gone])
+        store.record_check("seller_one", listing_count=2, new_count=0)
+
+        # Only 1 listing returned, well under max_items=10, so the result is complete:
+        # the absent listing genuinely ended.
+        service.ebay = FakeEbay([still_active])
+
+        count = asyncio.run(service.check_once())
+
+        assert count == 1
+        assert service.telegram.ended == [("chat-1", "100000000002")]
+    finally:
+        store.close()
+
+
+def test_observed_changed_seller_detects_a_single_rename() -> None:
+    service = object.__new__(EbaySpyService)
+
+    def _listing(item_id: str, seller: str) -> Listing:
+        return Listing(
+            item_id=item_id,
+            seller=seller,
+            title="t",
+            price="GBP 1.00",
+            url=f"https://example.test/itm/{item_id}",
+        )
+
+    renamed = [_listing("100000000001", "new_name"), _listing("100000000002", "new_name")]
+    assert service._observed_changed_seller("old_name", renamed) == "new_name"
+
+    unchanged = [_listing("100000000001", "old_name")]
+    assert service._observed_changed_seller("old_name", unchanged) is None
+
+    ambiguous = [_listing("100000000001", "new_name"), _listing("100000000002", "other_name")]
+    assert service._observed_changed_seller("old_name", ambiguous) is None
+
+    assert service._observed_changed_seller("old_name", []) is None

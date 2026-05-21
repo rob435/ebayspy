@@ -39,15 +39,11 @@ class Config:
     ebay_app_id: str | None
     ebay_client_secret: str | None
     ebay_global_id: str
-    ebay_browser_headless: bool
-    ebay_browser_profile_dir: Path | None
-    ebay_browser_executable_path: str | None
-    ebay_browser_block_wait_seconds: int
     sqlite_path: Path
     poll_interval_seconds: int
     seller_check_delay_seconds: int
     max_items_per_seller: int
-    description_concurrency: int
+    detail_concurrency: int
     notify_existing_on_first_run: bool
     http_timeout_seconds: int
     seed_sellers: tuple[str, ...]
@@ -67,18 +63,11 @@ class Config:
             ebay_app_id=app_id,
             ebay_client_secret=client_secret,
             ebay_global_id=os.getenv("EBAY_GLOBAL_ID", "EBAY-US").strip() or "EBAY-US",
-            ebay_browser_headless=_bool_env("EBAY_BROWSER_HEADLESS", True),
-            ebay_browser_profile_dir=(
-                Path(value) if (value := os.getenv("EBAY_BROWSER_PROFILE_DIR", "").strip()) else None
-            ),
-            ebay_browser_executable_path=os.getenv("EBAY_BROWSER_EXECUTABLE_PATH", "").strip()
-            or None,
-            ebay_browser_block_wait_seconds=_int_env("EBAY_BROWSER_BLOCK_WAIT_SECONDS", 0),
             sqlite_path=Path(os.getenv("SQLITE_PATH", "ebayspy.sqlite3")),
             poll_interval_seconds=_int_env("POLL_INTERVAL_SECONDS", 900),
             seller_check_delay_seconds=_int_env("SELLER_CHECK_DELAY_SECONDS", 0),
             max_items_per_seller=_int_env("MAX_ITEMS_PER_SELLER", 20),
-            description_concurrency=_int_env("DESCRIPTION_CONCURRENCY", 5),
+            detail_concurrency=_int_env("DETAIL_CONCURRENCY", 5),
             notify_existing_on_first_run=_bool_env("NOTIFY_EXISTING_ON_FIRST_RUN", False),
             http_timeout_seconds=_int_env("HTTP_TIMEOUT_SECONDS", 20),
             seed_sellers=tuple(_csv_env("SELLERS")),
@@ -87,3 +76,10 @@ class Config:
     def require_telegram(self) -> None:
         if not self.telegram_bot_token:
             raise SystemExit("TELEGRAM_BOT_TOKEN is required. Add it to .env or the environment.")
+
+    def require_ebay(self) -> None:
+        if not self.ebay_app_id or not self.ebay_client_secret:
+            raise SystemExit(
+                "EBAY_APP_ID and EBAY_CLIENT_SECRET are required. Create an application "
+                "keyset at https://developer.ebay.com and add them to .env."
+            )

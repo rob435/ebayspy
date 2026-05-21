@@ -4,6 +4,16 @@ from ebayspy.ebay import EbayClient
 from ebayspy.models import Listing
 
 
+def _client() -> EbayClient:
+    return EbayClient(
+        app_id="appid",
+        client_secret="secret",
+        global_id="EBAY-US",
+        timeout_seconds=1,
+        max_items=20,
+    )
+
+
 def test_extract_item_id_from_listing_path() -> None:
     url = "https://www.ebay.com/itm/Test-Item/123456789012?hash=item"
 
@@ -20,14 +30,16 @@ def test_clean_description_collapses_whitespace() -> None:
     assert EbayClient._clean_description("A   nice\n\nitem\tlisted today") == "A nice item listed today"
 
 
+def test_legacy_id_from_browse_id() -> None:
+    assert EbayClient._legacy_id_from_browse_id("v1|123456789012|0") == "123456789012"
+
+
+def test_marketplace_id_from_global_id() -> None:
+    assert _client()._marketplace_id() == "EBAY_US"
+
+
 def test_browse_item_maps_to_listing() -> None:
-    client = EbayClient(
-        app_id="appid",
-        client_secret="secret",
-        global_id="EBAY-US",
-        timeout_seconds=1,
-        max_items=20,
-    )
+    client = _client()
     item = {
         "legacyItemId": "123456789012",
         "seller": {"username": "seller_one"},
@@ -35,6 +47,7 @@ def test_browse_item_maps_to_listing() -> None:
         "price": {"value": "10.00", "currency": "USD"},
         "itemWebUrl": "https://www.ebay.com/itm/123456789012",
         "itemCreationDate": "2026-04-30T12:00:00.000Z",
+        "shortDescription": "A   tidy   summary",
         "image": {"imageUrl": "https://example.test/image.jpg"},
         "buyingOptions": ["FIXED_PRICE"],
         "categories": [{"categoryName": "Video Games"}],
@@ -46,6 +59,7 @@ def test_browse_item_maps_to_listing() -> None:
         assert listing.item_id == "123456789012"
         assert listing.seller == "seller_one"
         assert listing.price == "10.00 USD"
+        assert listing.description == "A tidy summary"
         assert listing.quantity_available == "7"
         assert listing.listing_type == "FIXED_PRICE"
         assert listing.category == "Video Games"
@@ -53,79 +67,26 @@ def test_browse_item_maps_to_listing() -> None:
         asyncio.run(client.close())
 
 
-def test_legacy_id_from_browse_id() -> None:
-    assert EbayClient._legacy_id_from_browse_id("v1|123456789012|0") == "123456789012"
-
-
-def test_parse_seller_search_html_maps_cards_to_listings() -> None:
-    client = EbayClient(
-        app_id=None,
-        global_id="EBAY-US",
-        timeout_seconds=1,
-        max_items=20,
-    )
-    html = """
-    <ul>
-      <li class="s-item">
-        <div class="s-item__title">Example Item</div>
-        <a class="s-item__link" href="https://www.ebay.com/itm/Example/123456789012"></a>
-        <span class="s-item__price">$10.00</span>
-        <span class="s-item__purchase-options">Buy It Now</span>
-        <div>3 available</div>
-        <div class="s-item__image"><img src="https://example.test/image.jpg"></div>
-      </li>
-      <li class="s-item">
-        <div class="s-item__title">Shop on eBay</div>
-        <a class="s-item__link" href="https://www.ebay.com/"></a>
-      </li>
-    </ul>
-    """
+def test_browse_item_falls_back_to_search_seller() -> None:
+    client = _client()
+    item = {
+        "legacyItemId": "123456789012",
+        "title": "Example",
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+    }
     try:
-        listings = client._parse_seller_search_html("seller_one", html)
+        listing = client._listing_from_browse_item("watched_seller", item)
 
-        assert listings == [
-            Listing(
-                item_id="123456789012",
-                seller="seller_one",
-                title="Example Item",
-                price="$10.00",
-                url="https://www.ebay.com/itm/Example/123456789012",
-                image_url="https://example.test/image.jpg",
-                listing_type="Buy It Now",
-                quantity_available="3",
-            )
-        ]
+        assert listing.seller == "watched_seller"
+        assert listing.description == ""
+        assert listing.quantity_available == ""
     finally:
         asyncio.run(client.close())
 
 
-def test_parse_seller_search_html_reports_block_page() -> None:
-    client = EbayClient(
-        app_id=None,
-        global_id="EBAY-US",
-        timeout_seconds=1,
-        max_items=20,
-    )
-    try:
-        try:
-            client._parse_seller_search_html("seller_one", "<h1>Access Denied</h1>")
-        except RuntimeError as exc:
-            assert "blocked" in str(exc)
-        else:
-            raise AssertionError("expected block page to raise")
-    finally:
-        asyncio.run(client.close())
-
-
-def test_seller_listings_uses_browser_scraper_only() -> None:
-    client = EbayClient(
-        app_id="appid",
-        client_secret="secret",
-        global_id="EBAY-US",
-        timeout_seconds=1,
-        max_items=20,
-    )
-    browser_listing = Listing(
+def test_seller_listings_searches_then_hydrates() -> None:
+    client = _client()
+    found = Listing(
         item_id="123456789012",
         seller="seller_one",
         title="Example",
@@ -133,17 +94,46 @@ def test_seller_listings_uses_browser_scraper_only() -> None:
         url="https://example.test/itm/123456789012",
     )
 
-    async def browser_scrape(seller: str) -> list[Listing]:
-        return [browser_listing]
+    async def fake_search(seller: str) -> list[Listing]:
+        return [found]
 
-    async def api_error(seller: str) -> list[Listing]:
-        raise AssertionError("API should not be called")
+    async def fake_detail(item_id: str) -> dict:
+        return {
+            "shortDescription": "Hydrated   summary",
+            "estimatedAvailabilities": [{"estimatedAvailableQuantity": 9}],
+        }
 
-    client._seller_listings_browser = browser_scrape
-    client._seller_listings_browse = api_error
-    client._seller_listings_api = api_error
-    client._seller_listings_scrape = api_error
+    client._search_seller_listings = fake_search
+    client._get_item_by_legacy_id = fake_detail
     try:
-        assert asyncio.run(client.seller_listings("seller_one")) == [browser_listing]
+        listings = asyncio.run(client.seller_listings("seller_one"))
+
+        assert len(listings) == 1
+        assert listings[0].quantity_available == "9"
+        assert listings[0].description == "Hydrated summary"
+    finally:
+        asyncio.run(client.close())
+
+
+def test_hydration_failure_keeps_search_listing() -> None:
+    client = _client()
+    found = Listing(
+        item_id="123456789012",
+        seller="seller_one",
+        title="Example",
+        price="$10.00",
+        url="https://example.test/itm/123456789012",
+    )
+
+    async def fake_search(seller: str) -> list[Listing]:
+        return [found]
+
+    async def failing_detail(item_id: str) -> dict:
+        raise RuntimeError("eBay item lookup failed")
+
+    client._search_seller_listings = fake_search
+    client._get_item_by_legacy_id = failing_detail
+    try:
+        assert asyncio.run(client.seller_listings("seller_one")) == [found]
     finally:
         asyncio.run(client.close())

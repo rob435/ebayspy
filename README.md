@@ -29,7 +29,6 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
-python -m playwright install chromium
 Copy-Item .env.example .env
 ```
 
@@ -37,9 +36,14 @@ Edit `.env`:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:your_bot_token
+EBAY_APP_ID=your-ebay-app-id
+EBAY_CLIENT_SECRET=your-ebay-cert-id
 SELLERS=seller_one,seller_two
-DESCRIPTION_CONCURRENCY=5
 ```
+
+ebayspy reads seller listings from the official eBay Browse API. Register an
+application at the [eBay Developers Program](https://developer.ebay.com/), then copy the
+Production keyset's **App ID (Client ID)** and **Cert ID (Client Secret)** into `.env`.
 
 Create a Telegram bot with BotFather, put its token in `.env`, then send `/start` to the bot.
 If `TELEGRAM_CHAT_ID` is omitted, the app records chats that use `/start` and sends alerts there.
@@ -77,11 +81,9 @@ ebayspy status
 Use `systemd/ebayspy.service` as a template. Update `WorkingDirectory`, `EnvironmentFile`,
 and `ExecStart` for your server path.
 
-ebayspy uses a browser-based scraper for eBay seller pages. If eBay blocks headless browser
-sessions, set `EBAY_BROWSER_HEADLESS=false` and optionally set `EBAY_BROWSER_PROFILE_DIR` to reuse
-a normal browser profile/cookie jar. `EBAY_BROWSER_BLOCK_WAIT_SECONDS=120` keeps the visible
-browser open on an eBay block/challenge page so you can clear it manually before parsing continues.
-Running from a residential network is more reliable than a VPS for this kind of scraping.
+ebayspy talks to the official eBay Browse API, so it runs reliably from a VPS with no
+browser. The eBay API enforces per-application daily call limits; if you watch many
+sellers, raise `POLL_INTERVAL_SECONDS` or lower `MAX_ITEMS_PER_SELLER` to stay within them.
 
 By default, the first scan seeds existing listings without alerting so you only get genuinely new
 items after the tracker starts. Set `NOTIFY_EXISTING_ON_FIRST_RUN=true` if you want the current

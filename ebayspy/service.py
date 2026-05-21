@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 class EbaySpyService:
     def __init__(self, config: Config) -> None:
         config.require_telegram()
+        config.require_ebay()
         self.config = config
         self.store = Store(config.sqlite_path)
         self.ebay = EbayClient(
@@ -31,14 +32,11 @@ class EbaySpyService:
             global_id=config.ebay_global_id,
             timeout_seconds=config.http_timeout_seconds,
             max_items=config.max_items_per_seller,
-            description_concurrency=config.description_concurrency,
-            browser_headless=config.ebay_browser_headless,
-            browser_profile_dir=config.ebay_browser_profile_dir,
-            browser_executable_path=config.ebay_browser_executable_path,
-            browser_block_wait_seconds=config.ebay_browser_block_wait_seconds,
+            detail_concurrency=config.detail_concurrency,
         )
         self.telegram = TelegramBot(config.telegram_bot_token, config.http_timeout_seconds)
         self.stop_event = asyncio.Event()
+        self._check_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await self.telegram.close()
@@ -102,6 +100,10 @@ class EbaySpyService:
             await self.close()
 
     async def check_once(self) -> int:
+        async with self._check_lock:
+            return await self._check_all_sellers()
+
+    async def _check_all_sellers(self) -> int:
         self.seed_config_sellers()
         sellers = self.store.list_sellers()
         if not sellers:
@@ -140,6 +142,7 @@ class EbaySpyService:
             first_scan = not self.store.seller_has_successful_check(seller)
             notify_existing = self.config.notify_existing_on_first_run or not first_scan
             active_item_ids = {listing.item_id for listing in listings}
+            listings_truncated = len(listings) >= self.config.max_items_per_seller
             for listing in reversed(listings):
                 if self.store.is_seen(listing.item_id):
                     continue
@@ -160,12 +163,13 @@ class EbaySpyService:
                     if sent:
                         total_alert_count += 1
 
-                for listing in self.store.ended_candidates(seller, active_item_ids):
-                    sent = await self._notify_ended_chats(chats, listing)
-                    if sent:
-                        seller_ended_count += 1
-                        total_alert_count += 1
-                    self.store.mark_ended_notified(listing.item_id)
+                if not listings_truncated:
+                    for listing in self.store.ended_candidates(seller, active_item_ids):
+                        sent = await self._notify_ended_chats(chats, listing)
+                        if sent:
+                            seller_ended_count += 1
+                            total_alert_count += 1
+                        self.store.mark_ended_notified(listing.item_id)
 
             self.store.upsert_active_listings(listings)
             self.store.record_check(seller, len(listings), seller_new_count, seller_ended_count)
@@ -351,9 +355,7 @@ class EbaySpyService:
                     exc.__class__.__name__,
                 )
                 return "I could not verify that seller with eBay right now. Try again in a minute."
-            if not exists:
-                if exists is False:
-                    return f"I could not find an eBay seller named: {seller}"
+            if exists is None:
                 log.warning("Adding eBay seller %s without external existence confirmation", seller)
             self.store.add_chat(chat_id, username)
             added = self.store.add_seller(seller)
