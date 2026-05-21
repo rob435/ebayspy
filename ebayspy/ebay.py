@@ -5,79 +5,58 @@ import base64
 import logging
 import re
 import time
-import xml.etree.ElementTree as ET
-from pathlib import Path
-from urllib.parse import quote_plus, urlencode
+from dataclasses import replace
 
 import httpx
-from bs4 import BeautifulSoup
 
 from .models import Listing
 
 log = logging.getLogger(__name__)
+
+OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+BROWSE_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+BROWSE_ITEM_BY_LEGACY_ID_URL = "https://api.ebay.com/buy/browse/v1/item/get_item_by_legacy_id"
 
 
 class EbayClient:
     def __init__(
         self,
         app_id: str | None,
+        client_secret: str | None,
         global_id: str,
         timeout_seconds: int,
         max_items: int,
-        description_concurrency: int = 5,
-        client_secret: str | None = None,
-        browser_headless: bool = True,
-        browser_profile_dir: Path | None = None,
-        browser_executable_path: str | None = None,
-        browser_block_wait_seconds: int = 0,
+        detail_concurrency: int = 5,
     ) -> None:
         self.app_id = app_id
         self.client_secret = client_secret
         self.global_id = global_id
         self.max_items = max_items
-        self.description_concurrency = max(1, description_concurrency)
-        self.browser_headless = browser_headless
-        self.browser_profile_dir = browser_profile_dir
-        self.browser_executable_path = browser_executable_path
-        self.browser_block_wait_seconds = max(0, browser_block_wait_seconds)
+        self.detail_concurrency = max(1, detail_concurrency)
         self._oauth_token: str | None = None
         self._oauth_token_expires_at = 0.0
-        self._playwright = None
-        self._browser = None
-        self._browser_context = None
         self.client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; ebayspy/0.1; "
-                    "+https://github.com/local/ebayspy)"
-                ),
+                "User-Agent": "ebayspy/0.1 (+https://github.com/rob435/ebayspy)",
                 "Accept-Language": "en-US,en;q=0.9",
             },
             follow_redirects=True,
         )
 
     async def close(self) -> None:
-        if self._browser_context is not None:
-            await self._browser_context.close()
-            self._browser_context = None
-        if self._browser is not None:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright is not None:
-            await self._playwright.stop()
-            self._playwright = None
         await self.client.aclose()
 
     async def seller_listings(self, seller: str) -> list[Listing]:
-        return await self._seller_listings_browser(seller)
+        listings = await self._search_seller_listings(seller)
+        return await self._hydrate_listings(listings)
 
     async def seller_exists(self, seller: str) -> bool | None:
         try:
-            await self._seller_listings_browser(seller)
+            await self._search_seller_listings(seller)
         except Exception as exc:
             log.warning(
-                "Could not validate eBay seller %s with browser scraper %s",
+                "Could not validate eBay seller %s with the Browse API: %s",
                 seller,
                 exc.__class__.__name__,
             )
@@ -85,157 +64,23 @@ class EbayClient:
         return True
 
     async def item_seller(self, item_id: str) -> str | None:
-        return None
-
-    async def _browser_page(self):
-        if self._browser_context is not None:
-            return await self._browser_context.new_page()
         try:
-            from playwright.async_api import async_playwright
-        except ImportError as exc:
-            raise RuntimeError(
-                "Browser scraping requires Playwright. Run `pip install -e .` and "
-                "`python -m playwright install chromium`."
-            ) from exc
-
-        self._playwright = await async_playwright().start()
-        launch_options = {
-            "headless": self.browser_headless,
-            "executable_path": self.browser_executable_path,
-        }
-        launch_options = {key: value for key, value in launch_options.items() if value is not None}
-        context_options = {
-            "user_agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "locale": "en-US",
-            "viewport": {"width": 1365, "height": 900},
-        }
-        if self.browser_profile_dir is not None:
-            self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
-            self._browser_context = await self._playwright.chromium.launch_persistent_context(
-                str(self.browser_profile_dir),
-                **launch_options,
-                **context_options,
-            )
-        else:
-            self._browser = await self._playwright.chromium.launch(**launch_options)
-            self._browser_context = await self._browser.new_context(**context_options)
-        return await self._browser_context.new_page()
-
-    async def _seller_listings_browser(self, seller: str) -> list[Listing]:
-        page = await self._browser_page()
-        try:
-            await page.goto(self.seller_url(seller), wait_until="domcontentloaded")
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-            except Exception:
-                pass
-            content = await page.content()
-            if (
-                self._is_block_page(content)
-                and not self.browser_headless
-                and self.browser_block_wait_seconds > 0
-            ):
-                log.warning(
-                    "eBay blocked the visible browser scraper for %s; waiting %s seconds "
-                    "for manual browser interaction",
-                    seller,
-                    self.browser_block_wait_seconds,
-                )
-                await page.wait_for_timeout(self.browser_block_wait_seconds * 1000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=10_000)
-                except Exception:
-                    pass
-                content = await page.content()
-        finally:
-            await page.close()
-        return self._parse_seller_search_html(seller, content)
-
-    def _parse_seller_search_html(self, seller: str, html: str) -> list[Listing]:
-        if self._is_block_page(html):
-            raise RuntimeError("eBay blocked the browser scraper for the seller search page")
-        soup = BeautifulSoup(html, "html.parser")
-        listings: list[Listing] = []
-        for card in soup.select("li.s-item"):
-            listing = self._listing_from_search_card(seller, card)
-            if listing is None:
-                continue
-            listings.append(listing)
-            if len(listings) >= self.max_items:
-                break
-        return listings
-
-    def _listing_from_search_card(self, seller: str, card) -> Listing | None:
-        title_node = card.select_one(".s-item__title")
-        link_node = card.select_one("a.s-item__link")
-        price_node = card.select_one(".s-item__price")
-        purchase_node = card.select_one(".s-item__purchase-options, .s-item__dynamic")
-        image_node = card.select_one(".s-item__image img")
-        title = title_node.get_text(" ", strip=True) if title_node else ""
-        item_url = str(link_node.get("href") or "") if link_node else ""
-        item_id = self._extract_item_id(item_url)
-        if not title or title.lower() == "shop on ebay" or not item_id:
+            item = await self._get_item_by_legacy_id(item_id)
+        except Exception:
+            log.debug("Could not fetch eBay item %s", item_id, exc_info=True)
             return None
-        card_text = card.get_text(" ", strip=True)
-        return Listing(
-            item_id=item_id,
-            seller=seller,
-            title=title,
-            price=price_node.get_text(" ", strip=True) if price_node else "",
-            url=item_url,
-            image_url=str(image_node.get("src") or image_node.get("data-src") or "")
-            if image_node
-            else None,
-            listing_type=purchase_node.get_text(" ", strip=True) if purchase_node else "",
-            quantity_available=self._quantity_from_text(card_text),
-        )
-
-    @staticmethod
-    def _is_block_page(html: str) -> bool:
-        return "Access Denied" in html or "Service Unavailable" in html
-
-    @staticmethod
-    def _quantity_from_text(text: str) -> str:
-        match = re.search(r"(\d+)\s+available", text, flags=re.IGNORECASE)
-        return match.group(1) if match else ""
-
-    async def _item_seller_api(self, item_id: str) -> str | None:
-        if not self.app_id:
-            return None
-        params = {
-            "callname": "GetSingleItem",
-            "responseencoding": "XML",
-            "appid": self.app_id,
-            "siteid": self._site_id(),
-            "version": "1199",
-            "ItemID": item_id,
-            "IncludeSelector": "Details",
-        }
-        response = await self.client.get("https://open.api.ebay.com/shopping", params=params)
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
-        ack = root.findtext("e:Ack", namespaces=ns) or root.findtext("Ack")
-        if ack and ack.lower() not in {"success", "warning"}:
-            return None
-        return (
-            root.findtext(".//e:Seller/e:UserID", namespaces=ns)
-            or root.findtext(".//Seller/UserID")
-            or None
-        )
+        username = (item.get("seller") or {}).get("username")
+        return str(username) if username else None
 
     async def _oauth_access_token(self) -> str:
         if self._oauth_token and time.time() < self._oauth_token_expires_at:
             return self._oauth_token
         if not self.app_id or not self.client_secret:
-            raise RuntimeError("EBAY_APP_ID and EBAY_CLIENT_SECRET are required for OAuth")
+            raise RuntimeError("EBAY_APP_ID and EBAY_CLIENT_SECRET are required for the eBay API")
 
         credentials = base64.b64encode(f"{self.app_id}:{self.client_secret}".encode()).decode()
         response = await self.client.post(
-            "https://api.ebay.com/identity/v1/oauth2/token",
+            OAUTH_URL,
             headers={
                 "Authorization": f"Basic {credentials}",
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -245,7 +90,10 @@ class EbayClient:
                 "scope": "https://api.ebay.com/oauth/api_scope",
             },
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"eBay OAuth request failed ({response.status_code}): {self._error_text(response)}"
+            )
         payload = response.json()
         token = str(payload["access_token"])
         expires_in = int(payload.get("expires_in", 7200))
@@ -253,27 +101,85 @@ class EbayClient:
         self._oauth_token_expires_at = time.time() + max(60, expires_in - 60)
         return token
 
-    async def _seller_listings_browse(self, seller: str) -> list[Listing]:
+    async def _authorized_headers(self) -> dict[str, str]:
         token = await self._oauth_access_token()
+        return {
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": self._marketplace_id(),
+        }
+
+    async def _search_seller_listings(self, seller: str) -> list[Listing]:
+        headers = await self._authorized_headers()
+        # The Browse API rejects a search with no query criterion, so category_ids=0
+        # (the root category) is paired with the seller filter to list everything a
+        # seller has. buyingOptions keeps auction listings, which are otherwise dropped.
         response = await self.client.get(
-            "https://api.ebay.com/buy/browse/v1/item_summary/search",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-EBAY-C-MARKETPLACE-ID": self._marketplace_id(),
-            },
+            BROWSE_SEARCH_URL,
+            headers=headers,
             params={
-                "filter": f"sellers:{{{seller}}}",
+                "category_ids": "0",
+                "filter": f"sellers:{{{seller}}},buyingOptions:{{FIXED_PRICE|AUCTION}}",
                 "sort": "newlyListed",
-                "limit": min(self.max_items, 200),
+                "limit": min(max(self.max_items, 1), 200),
             },
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"eBay Browse API search failed ({response.status_code}): "
+                f"{self._error_text(response)}"
+            )
         payload = response.json()
         listings = [
             self._listing_from_browse_item(seller, item)
-            for item in payload.get("itemSummaries", [])
+            for item in payload.get("itemSummaries") or []
         ]
         return [listing for listing in listings if listing.item_id and listing.url]
+
+    async def _hydrate_listings(self, listings: list[Listing]) -> list[Listing]:
+        """Fetch per-item detail so quantity (and a fuller description) are populated."""
+        if not listings:
+            return listings
+        semaphore = asyncio.Semaphore(self.detail_concurrency)
+
+        async def hydrate(listing: Listing) -> Listing:
+            async with semaphore:
+                try:
+                    item = await self._get_item_by_legacy_id(listing.item_id)
+                except Exception:
+                    log.debug(
+                        "Could not fetch eBay item detail for %s", listing.item_id, exc_info=True
+                    )
+                    return listing
+            description = listing.description or self._clean_description(
+                str(item.get("shortDescription") or "")
+            )
+            return replace(
+                listing,
+                description=description,
+                quantity_available=self._availability_quantity(item),
+            )
+
+        results = await asyncio.gather(
+            *(hydrate(listing) for listing in listings), return_exceptions=True
+        )
+        return [
+            result if isinstance(result, Listing) else original
+            for original, result in zip(listings, results)
+        ]
+
+    async def _get_item_by_legacy_id(self, item_id: str) -> dict:
+        headers = await self._authorized_headers()
+        response = await self.client.get(
+            BROWSE_ITEM_BY_LEGACY_ID_URL,
+            headers=headers,
+            params={"legacy_item_id": item_id},
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"eBay Browse API item lookup failed ({response.status_code}): "
+                f"{self._error_text(response)}"
+            )
+        return response.json()
 
     def _listing_from_browse_item(self, seller: str, item: dict) -> Listing:
         price = item.get("price") or {}
@@ -292,160 +198,25 @@ class EbayClient:
             title=str(item.get("title") or "Untitled"),
             price=f"{price_value} {price_currency}".strip(),
             url=str(item.get("itemWebUrl") or ""),
-            listed_at=item.get("itemCreationDate") or item.get("itemOriginDate"),
+            description=self._clean_description(str(item.get("shortDescription") or "")),
+            listed_at=item.get("itemCreationDate"),
             image_url=(item.get("image") or {}).get("imageUrl"),
             listing_type=", ".join(item.get("buyingOptions") or []),
             category=str(categories[0].get("categoryName") or "") if categories else "",
             quantity_available=self._availability_quantity(item),
         )
 
-    async def _seller_listings_api(self, seller: str) -> list[Listing]:
-        params: dict[str, str | int] = {
-            "OPERATION-NAME": "findItemsAdvanced",
-            "SERVICE-VERSION": "1.13.0",
-            "SECURITY-APPNAME": self.app_id or "",
-            "GLOBAL-ID": self.global_id,
-            "RESPONSE-DATA-FORMAT": "XML",
-            "REST-PAYLOAD": "",
-            "paginationInput.entriesPerPage": self.max_items,
-            "sortOrder": "StartTimeNewest",
-            "itemFilter(0).name": "Seller",
-            "itemFilter(0).value(0)": seller,
-            "itemFilter(1).name": "LocatedIn",
-            "itemFilter(1).value": "WorldWide",
-            "itemFilter(2).name": "ListingType",
-            "itemFilter(2).value": "All",
-            "outputSelector(0)": "SellerInfo",
-        }
-        response = await self.client.get("https://svcs.ebay.com/services/search/FindingService/v1", params=params)
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        ns = {"e": "http://www.ebay.com/marketplace/search/v1/services"}
-        ack = root.findtext("e:ack", namespaces=ns)
-        if ack and ack.lower() not in {"success", "warning"}:
-            message = root.findtext(".//e:message", namespaces=ns) or "unknown eBay API error"
-            raise RuntimeError(message)
-
-        listings: list[Listing] = []
-        for item in root.findall(".//e:item", namespaces=ns):
-            item_id = item.findtext("e:itemId", namespaces=ns) or ""
-            title = item.findtext("e:title", namespaces=ns) or "Untitled"
-            url = item.findtext("e:viewItemURL", namespaces=ns) or ""
-            listed_at = item.findtext("e:listingInfo/e:startTime", namespaces=ns)
-            listing_type = item.findtext("e:listingInfo/e:listingType", namespaces=ns) or ""
-            category = item.findtext("e:primaryCategory/e:categoryName", namespaces=ns) or ""
-            quantity_available = item.findtext("e:quantityAvailable", namespaces=ns) or ""
-            seller_name = item.findtext("e:sellerInfo/e:sellerUserName", namespaces=ns) or seller
-            price_value = item.findtext("e:sellingStatus/e:currentPrice", namespaces=ns) or ""
-            price_currency = (
-                item.find("e:sellingStatus/e:currentPrice", namespaces=ns).attrib.get("currencyId", "")
-                if item.find("e:sellingStatus/e:currentPrice", namespaces=ns) is not None
-                else ""
-            )
-            image_url = item.findtext("e:galleryURL", namespaces=ns)
-            if not item_id or not url:
-                continue
-            listings.append(
-                Listing(
-                    item_id=item_id,
-                    seller=seller_name,
-                    title=title,
-                    price=f"{price_value} {price_currency}".strip(),
-                    url=url,
-                    listed_at=listed_at,
-                    image_url=image_url,
-                    listing_type=listing_type,
-                    category=category,
-                    quantity_available=quantity_available,
-                )
-            )
-
-        return await self._hydrate_descriptions(listings[: self.max_items])
-
-    async def _seller_listings_scrape(self, seller: str) -> list[Listing]:
-        params = urlencode({"_ssn": seller, "_sop": "10", "_ipg": str(self.max_items)})
-        url = f"https://www.ebay.com/sch/i.html?{params}"
-        response = await self.client.get(url)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        listings: list[Listing] = []
-        for card in soup.select("li.s-item"):
-            title_node = card.select_one(".s-item__title")
-            link_node = card.select_one("a.s-item__link")
-            price_node = card.select_one(".s-item__price")
-            purchase_node = card.select_one(".s-item__purchase-options, .s-item__dynamic")
-            if not title_node or not link_node:
-                continue
-            title = title_node.get_text(" ", strip=True)
-            item_url = str(link_node.get("href") or "")
-            if not title or title.lower() == "shop on ebay" or not item_url:
-                continue
-            item_id = self._extract_item_id(item_url)
-            if not item_id:
-                continue
-            listings.append(
-                Listing(
-                    item_id=item_id,
-                    seller=seller,
-                    title=title,
-                    price=price_node.get_text(" ", strip=True) if price_node else "",
-                    url=item_url,
-                    listing_type=(
-                        purchase_node.get_text(" ", strip=True) if purchase_node else ""
-                    ),
-                )
-            )
-            if len(listings) >= self.max_items:
-                break
-        return await self._hydrate_descriptions(listings)
-
-    async def _hydrate_descriptions(self, listings: list[Listing]) -> list[Listing]:
-        semaphore = asyncio.Semaphore(self.description_concurrency)
-
-        async def hydrate_one(listing: Listing) -> Listing:
-            async with semaphore:
-                description = await self._fetch_description(listing.url)
-            return Listing(
-                item_id=listing.item_id,
-                seller=listing.seller,
-                title=listing.title,
-                price=listing.price,
-                url=listing.url,
-                description=description,
-                listed_at=listing.listed_at,
-                image_url=listing.image_url,
-                listing_type=listing.listing_type,
-                category=listing.category,
-                quantity_available=listing.quantity_available,
-            )
-
-        results = await asyncio.gather(
-            *(hydrate_one(listing) for listing in listings), return_exceptions=True
-        )
-        hydrated = []
-        for result in results:
-            if isinstance(result, Listing):
-                hydrated.append(result)
-            else:
-                log.debug("Could not hydrate listing description", exc_info=result)
-        return hydrated
-
-    async def _fetch_description(self, url: str) -> str:
+    @staticmethod
+    def _error_text(response: httpx.Response) -> str:
         try:
-            response = await self.client.get(url)
-            response.raise_for_status()
+            errors = response.json().get("errors") or []
         except Exception:
-            log.debug("Could not fetch listing description from %s", url, exc_info=True)
-            return ""
-        soup = BeautifulSoup(response.text, "html.parser")
-        for selector in [
-            ('meta[property="og:description"]', "content"),
-            ('meta[name="description"]', "content"),
-        ]:
-            node = soup.select_one(selector[0])
-            if node and node.get(selector[1]):
-                return self._clean_description(str(node.get(selector[1])))
-        return ""
+            return response.text[:200]
+        messages = [
+            str(error.get("message") or error.get("longMessage") or error.get("errorId"))
+            for error in errors
+        ]
+        return "; ".join(message for message in messages if message) or response.text[:200]
 
     @staticmethod
     def _extract_item_id(url: str) -> str:
@@ -475,23 +246,6 @@ class EbayClient:
     def _legacy_id_from_browse_id(item_id: str) -> str:
         match = re.search(r"\|(\d{9,})\|", item_id)
         return match.group(1) if match else ""
-
-    @staticmethod
-    def seller_url(seller: str) -> str:
-        return f"https://www.ebay.com/sch/i.html?_ssn={quote_plus(seller)}&_sop=10"
-
-    def _site_id(self) -> str:
-        site_ids = {
-            "EBAY-US": "0",
-            "EBAY-GB": "3",
-            "EBAY-DE": "77",
-            "EBAY-AU": "15",
-            "EBAY-ENCA": "2",
-            "EBAY-FR": "71",
-            "EBAY-IT": "101",
-            "EBAY-ES": "186",
-        }
-        return site_ids.get(self.global_id.upper(), "0")
 
     def _marketplace_id(self) -> str:
         return self.global_id.upper().replace("-", "_")
