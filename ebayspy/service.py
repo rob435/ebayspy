@@ -165,6 +165,23 @@ class EbaySpyService:
 
                 if not listings_truncated:
                     for listing in self.store.ended_candidates(seller, active_item_ids):
+                        active = await self.ebay.item_active(listing.item_id)
+                        if active is True:
+                            log.info(
+                                "Suppressing ended alert for %s on %s: "
+                                "still active per getItem",
+                                listing.item_id,
+                                seller,
+                            )
+                            continue
+                        if active is None:
+                            log.warning(
+                                "Skipping ended alert for %s on %s: "
+                                "getItem could not verify",
+                                listing.item_id,
+                                seller,
+                            )
+                            continue
                         sent = await self._notify_ended_chats(chats, listing)
                         if sent:
                             seller_ended_count += 1

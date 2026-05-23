@@ -8,11 +8,19 @@ from ebayspy.storage import Store
 
 
 class FakeEbay:
-    def __init__(self, listings: list[Listing]) -> None:
+    def __init__(
+        self,
+        listings: list[Listing],
+        item_active_response: bool | None = False,
+    ) -> None:
         self.listings = listings
+        self.item_active_response = item_active_response
 
     async def seller_listings(self, seller: str) -> list[Listing]:
         return self.listings
+
+    async def item_active(self, item_id: str) -> bool | None:
+        return self.item_active_response
 
 
 class FakeTelegram:
@@ -305,3 +313,46 @@ def test_observed_changed_seller_detects_a_single_rename() -> None:
     assert service._observed_changed_seller("old_name", ambiguous) is None
 
     assert service._observed_changed_seller("old_name", []) is None
+
+
+def test_check_once_suppresses_ended_alert_when_item_still_active(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.max_items_per_seller = 10
+    service.config = config
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        still_listed = Listing(
+            item_id="100000000001",
+            seller="seller_one",
+            title="Still listed",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000001",
+        )
+        missing_from_search = Listing(
+            item_id="100000000002",
+            seller="seller_one",
+            title="Missing from this poll",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000002",
+        )
+        for listing in (still_listed, missing_from_search):
+            store.mark_seen(listing, notified=False)
+        store.upsert_active_listings([still_listed, missing_from_search])
+        store.record_check("seller_one", listing_count=2, new_count=0)
+
+        # The search omits item 100000000002, but item_active reports it is
+        # still listed -> the bot must suppress the false 'ended' alert.
+        service.ebay = FakeEbay([still_listed], item_active_response=True)
+
+        count = asyncio.run(service.check_once())
+
+        assert count == 0
+        assert service.telegram.ended == []
+    finally:
+        store.close()

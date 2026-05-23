@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import httpx
 
@@ -71,6 +72,27 @@ class EbayClient:
             return None
         username = (item.get("seller") or {}).get("username")
         return str(username) if username else None
+
+    async def item_active(self, item_id: str) -> bool | None:
+        # The Browse API seller-filtered search can transiently omit items
+        # that are still listed; verify before declaring an item ended.
+        # True = still active per getItem, False = ended, None = unknown.
+        try:
+            item = await self._get_item_by_legacy_id(item_id)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "404" in message or "not found" in message:
+                return False
+            log.debug("Could not verify active state for %s", item_id, exc_info=True)
+            return None
+        end_date = item.get("itemEndDate")
+        if not end_date:
+            return True
+        try:
+            parsed = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return parsed > datetime.now(timezone.utc)
 
     async def _oauth_access_token(self) -> str:
         if self._oauth_token and time.time() < self._oauth_token_expires_at:

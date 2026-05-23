@@ -115,6 +115,32 @@ def test_seller_listings_searches_then_hydrates() -> None:
         asyncio.run(client.close())
 
 
+def test_item_active_returns_true_for_open_listing() -> None:
+    client = _client()
+
+    async def fake_detail(item_id: str) -> dict:
+        return {"title": "Still listed"}
+
+    client._get_item_by_legacy_id = fake_detail
+    try:
+        assert asyncio.run(client.item_active("123456789012")) is True
+    finally:
+        asyncio.run(client.close())
+
+
+def test_item_active_returns_false_on_not_found() -> None:
+    client = _client()
+
+    async def fake_detail(item_id: str) -> dict:
+        raise RuntimeError("eBay Browse API item lookup failed (404): not found")
+
+    client._get_item_by_legacy_id = fake_detail
+    try:
+        assert asyncio.run(client.item_active("123456789012")) is False
+    finally:
+        asyncio.run(client.close())
+
+
 def test_hydration_failure_keeps_search_listing() -> None:
     client = _client()
     found = Listing(
