@@ -9,11 +9,14 @@ from .ebay import EbayClient
 from .models import Listing
 from .storage import (
     Store,
+    format_interval,
+    format_observed_rows,
     format_status_rows,
     is_valid_ebay_username,
     is_valid_telegram_username,
     normalize_ebay_username,
     normalize_telegram_username,
+    parse_interval,
 )
 from .telegram import TelegramBot
 
@@ -47,6 +50,10 @@ class EbaySpyService:
         for seller in self.config.seed_sellers:
             self.store.add_seller(seller)
 
+    def seed_observe_sellers(self) -> None:
+        for seller in self.config.observe_sellers:
+            self.store.add_observed_seller(seller)
+
     def configured_chats(self) -> list[str]:
         chats = []
         if self.config.telegram_chat_id:
@@ -78,6 +85,7 @@ class EbaySpyService:
 
     async def run_forever(self) -> None:
         self.seed_config_sellers()
+        self.seed_observe_sellers()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -85,6 +93,7 @@ class EbaySpyService:
             except NotImplementedError:
                 pass
         command_task = asyncio.create_task(self.telegram.poll_commands(self.handle_command))
+        observe_task = asyncio.create_task(self.run_observers())
         try:
             while not self.stop_event.is_set():
                 await self.check_once()
@@ -96,7 +105,8 @@ class EbaySpyService:
                     pass
         finally:
             command_task.cancel()
-            await asyncio.gather(command_task, return_exceptions=True)
+            observe_task.cancel()
+            await asyncio.gather(command_task, observe_task, return_exceptions=True)
             await self.close()
 
     async def check_once(self) -> int:
@@ -211,6 +221,90 @@ class EbaySpyService:
         self.store.record_check(seller, len(listings), new_count=0)
         return len(listings)
 
+    async def run_observers(self) -> None:
+        """Fast lane: poll observe-list sellers for newly listed items only.
+
+        Each seller has its own interval (or the configured default). Only the
+        cheap search call runs every tick; per-item detail is fetched solely for
+        listings that are genuinely new, so a fast cadence stays affordable.
+        """
+        loop = asyncio.get_running_loop()
+        next_due: dict[str, float] = {}
+        while not self.stop_event.is_set():
+            now = loop.time()
+            rows = self.store.list_observed_sellers()
+            current = {row["username"]: row for row in rows}
+            for username in [key for key in next_due if key not in current]:
+                del next_due[username]
+            if current:
+                chats = self.configured_chats()
+                for username, row in current.items():
+                    if self.stop_event.is_set():
+                        break
+                    due_at = next_due.get(username, now)
+                    if loop.time() >= due_at:
+                        await self._observe_seller(username, chats)
+                        next_due[username] = loop.time() + self._observe_interval_for(row)
+                    else:
+                        next_due[username] = due_at
+            sleep_for = self._observe_sleep_seconds(next_due, loop.time())
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=sleep_for)
+            except TimeoutError:
+                pass
+
+    def _observe_interval_for(self, row) -> int:
+        interval = row["interval_seconds"] or self.config.observe_interval_seconds
+        return max(self.config.observe_min_interval_seconds, interval)
+
+    @staticmethod
+    def _observe_sleep_seconds(next_due: dict[str, float], now: float) -> float:
+        # Cap the wait so sellers added or retuned from Telegram are picked up promptly.
+        tick = 10.0
+        if not next_due:
+            return tick
+        return max(1.0, min(tick, min(next_due.values()) - now))
+
+    async def _observe_seller(self, seller: str, chats: list[str]) -> int:
+        try:
+            listings = await self.ebay.seller_listings(seller, hydrate=False)
+        except Exception as exc:
+            log.exception("Failed observing seller %s", seller)
+            self.store.record_observe_check(seller, new_count=0, error=str(exc))
+            return 0
+
+        first_observe = not self.store.observed_seller_has_successful_check(seller)
+        new_listings = [
+            listing for listing in reversed(listings) if not self.store.is_seen(listing.item_id)
+        ]
+        sent_count = 0
+        if new_listings and first_observe:
+            # Seed the baseline silently so we only alert on items listed from now on.
+            for listing in new_listings:
+                self.store.mark_seen(listing, notified=False)
+        elif new_listings:
+            for listing in await self.ebay.hydrate_listings(new_listings):
+                sent = await self._notify_chats(chats, listing)
+                self.store.mark_seen(listing, notified=sent)
+                if sent:
+                    sent_count += 1
+        self.store.record_observe_check(seller, new_count=sent_count)
+        log.info(
+            "Observed %s: %s active listings, %s new alerted", seller, len(listings), sent_count
+        )
+        return sent_count
+
+    async def _seed_observe_baseline(self, seller: str) -> int | None:
+        try:
+            listings = await self.ebay.seller_listings(seller, hydrate=False)
+        except Exception:
+            log.exception("Failed seeding observe baseline for seller %s", seller)
+            return None
+        for listing in listings:
+            self.store.mark_seen(listing, notified=False)
+        self.store.record_observe_check(seller, new_count=0)
+        return len(listings)
+
     async def _detect_username_change(
         self, watched_seller: str, listings: list[Listing], chats: list[str]
     ) -> str | None:
@@ -316,7 +410,11 @@ class EbaySpyService:
             self.store.add_chat(chat_id, username)
             return (
                 "ebayspy is connected.\n"
-                "Commands: /add seller, /remove seller, /list, /status, /check, /help\n"
+                "Watch (every poll, new + ended + restock):\n"
+                "  /add seller, /remove seller, /list, /status, /check\n"
+                "Observe (fast new-listing alerts only):\n"
+                "  /observe seller [interval], /unobserve seller, /observing,"
+                " /interval seller <time>\n"
                 "Admin: /invite @username, /uninvite @username, /invites"
             )
         if command == "/invite":
@@ -404,4 +502,67 @@ class EbaySpyService:
             self.store.add_chat(chat_id, username)
             count = await self.check_once()
             return f"Check complete. Alerts sent: {count}"
+        if command == "/observe":
+            return await self._handle_observe(chat_id, username, arg)
+        if command == "/unobserve":
+            if not arg:
+                return "Usage: /unobserve sellername"
+            removed = self.store.remove_observed_seller(arg.split()[0])
+            return "Stopped observing." if removed else "Seller was not on the observe list."
+        if command == "/observing":
+            return format_observed_rows(
+                self.store.list_observed_sellers(), self.config.observe_interval_seconds
+            )
+        if command == "/interval":
+            return self._handle_interval(arg)
         return "Unknown command. Try /help"
+
+    async def _handle_observe(self, chat_id: str, username: str | None, arg: str) -> str:
+        parts = arg.split()
+        if not parts:
+            return "Usage: /observe sellername [interval e.g. 3m]"
+        seller = normalize_ebay_username(parts[0])
+        if not is_valid_ebay_username(seller):
+            return "That does not look like a valid eBay username."
+        interval: int | None = None
+        if len(parts) > 1:
+            interval = parse_interval(parts[1])
+            if interval is None:
+                return "Interval must look like 90s, 3m, or 1h."
+            interval = max(self.config.observe_min_interval_seconds, interval)
+        if self.store.has_observed_seller(seller):
+            return f"Already observing seller: {seller}"
+        try:
+            exists = await self.ebay.seller_exists(seller)
+        except Exception:
+            log.warning("Could not validate eBay seller %s for observe", seller)
+            return "I could not verify that seller with eBay right now. Try again in a minute."
+        self.store.add_chat(chat_id, username)
+        if not self.store.add_observed_seller(seller, interval):
+            return f"Already observing seller: {seller}"
+        baseline_count = await self._seed_observe_baseline(seller)
+        baseline_text = (
+            f" Seeded {baseline_count} current listings as already seen."
+            if baseline_count is not None
+            else " I added it, but could not seed the current listings yet."
+        )
+        every = format_interval(interval or self.config.observe_interval_seconds)
+        confirm = (
+            ""
+            if exists is not None
+            else " eBay would not confirm the profile, but I will keep checking."
+        )
+        return f"Observing seller: {seller} every {every}.{baseline_text}{confirm}"
+
+    def _handle_interval(self, arg: str) -> str:
+        parts = arg.split()
+        if len(parts) < 2:
+            return "Usage: /interval sellername 3m"
+        seller = normalize_ebay_username(parts[0])
+        interval = parse_interval(parts[1])
+        if interval is None:
+            return "Interval must look like 90s, 3m, or 1h."
+        interval = max(self.config.observe_min_interval_seconds, interval)
+        if not self.store.set_observed_interval(seller, interval):
+            return f"{seller} is not on the observe list. Add it with /observe first."
+        return f"Observing {seller} every {format_interval(interval)}."

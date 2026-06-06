@@ -6,7 +6,13 @@ import logging
 
 from .config import Config
 from .service import EbaySpyService
-from .storage import Store, format_status_rows
+from .storage import (
+    Store,
+    format_interval,
+    format_observed_rows,
+    format_status_rows,
+    parse_interval,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -14,8 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("run", help="Run the hourly Telegram tracker")
-    subparsers.add_parser("check", help="Run one poll immediately")
+    subparsers.add_parser("run", help="Run the Telegram tracker (watch + observe loops)")
+    subparsers.add_parser("check", help="Run one watch-list poll immediately")
     subparsers.add_parser("status", help="Show the last check status for each seller")
 
     sellers = subparsers.add_parser("sellers", help="Manage watched sellers")
@@ -25,6 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     remove = seller_sub.add_parser("remove", help="Remove a seller")
     remove.add_argument("username")
     seller_sub.add_parser("list", help="List sellers")
+
+    observe = subparsers.add_parser("observe", help="Manage fast-poll observe-list sellers")
+    observe_sub = observe.add_subparsers(dest="observe_command", required=True)
+    observe_add = observe_sub.add_parser("add", help="Add a seller to the observe list")
+    observe_add.add_argument("username")
+    observe_add.add_argument("interval", nargs="?", help="Optional interval, e.g. 90s, 3m, 1h")
+    observe_remove = observe_sub.add_parser("remove", help="Remove a seller from the observe list")
+    observe_remove.add_argument("username")
+    observe_sub.add_parser("list", help="List observe-list sellers")
     return parser
 
 
@@ -68,5 +83,27 @@ def main() -> None:
             elif args.seller_command == "list":
                 sellers = store.list_sellers()
                 print("\n".join(sellers) if sellers else "No sellers configured.")
+        finally:
+            store.close()
+    elif args.command == "observe":
+        store = Store(config.sqlite_path)
+        try:
+            if args.observe_command == "add":
+                interval = parse_interval(args.interval) if args.interval else None
+                if args.interval and interval is None:
+                    print("Interval must look like 90s, 3m, or 1h.")
+                elif interval is not None:
+                    interval = max(config.observe_min_interval_seconds, interval)
+                    store.add_observed_seller(args.username, interval)
+                    print(f"Observing seller: {args.username} every {format_interval(interval)}")
+                else:
+                    store.add_observed_seller(args.username)
+                    print(f"Observing seller: {args.username}")
+            elif args.observe_command == "remove":
+                removed = store.remove_observed_seller(args.username)
+                print("Removed." if removed else "Seller was not on the observe list.")
+            elif args.observe_command == "list":
+                rows = store.list_observed_sellers()
+                print(format_observed_rows(rows, config.observe_interval_seconds))
         finally:
             store.close()

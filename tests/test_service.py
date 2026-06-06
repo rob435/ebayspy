@@ -12,12 +12,22 @@ class FakeEbay:
         self,
         listings: list[Listing],
         item_active_response: bool | None = False,
+        seller_exists_response: bool | None = True,
     ) -> None:
         self.listings = listings
         self.item_active_response = item_active_response
+        self.seller_exists_response = seller_exists_response
+        self.hydrated: list[str] = []
 
-    async def seller_listings(self, seller: str) -> list[Listing]:
+    async def seller_listings(self, seller: str, *, hydrate: bool = True) -> list[Listing]:
         return self.listings
+
+    async def hydrate_listings(self, listings: list[Listing]) -> list[Listing]:
+        self.hydrated.extend(listing.item_id for listing in listings)
+        return listings
+
+    async def seller_exists(self, seller: str) -> bool | None:
+        return self.seller_exists_response
 
     async def item_active(self, item_id: str) -> bool | None:
         return self.item_active_response
@@ -52,6 +62,9 @@ def _service_config() -> SimpleNamespace:
         notify_existing_on_first_run=False,
         seller_check_delay_seconds=0,
         max_items_per_seller=20,
+        observe_interval_seconds=180,
+        observe_min_interval_seconds=30,
+        observe_sellers=(),
     )
 
 
@@ -356,3 +369,106 @@ def test_check_once_suppresses_ended_alert_when_item_still_active(tmp_path: Path
         assert service.telegram.ended == []
     finally:
         store.close()
+
+
+def _observe_service(store: Store, ebay: FakeEbay) -> EbaySpyService:
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.ebay = ebay
+    service.stop_event = asyncio.Event()
+    return service
+
+
+def test_observe_seller_seeds_silently_on_first_run(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    fresh = Listing(
+        item_id="222222222222",
+        seller="seller_one",
+        title="Brand new",
+        price="GBP 9.00",
+        url="https://example.test/itm/222222222222",
+    )
+    service = _observe_service(store, FakeEbay([fresh]))
+    try:
+        store.add_observed_seller("seller_one")
+
+        count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
+
+        assert count == 0
+        assert service.telegram.listings == []
+        assert service.ebay.hydrated == []
+        assert store.is_seen("222222222222")
+        assert store.observed_seller_has_successful_check("seller_one")
+    finally:
+        store.close()
+
+
+def test_observe_seller_alerts_and_hydrates_only_new_items(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    existing = Listing(
+        item_id="111111111111",
+        seller="seller_one",
+        title="Already seen",
+        price="GBP 5.00",
+        url="https://example.test/itm/111111111111",
+    )
+    fresh = Listing(
+        item_id="222222222222",
+        seller="seller_one",
+        title="Brand new",
+        price="GBP 9.00",
+        url="https://example.test/itm/222222222222",
+    )
+    service = _observe_service(store, FakeEbay([fresh, existing]))
+    try:
+        store.add_observed_seller("seller_one")
+        store.mark_seen(existing, notified=False)
+        store.record_observe_check("seller_one", new_count=0)  # marks a prior successful check
+
+        count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
+
+        assert count == 1
+        assert service.telegram.listings == [("chat-1", "222222222222")]
+        assert service.ebay.hydrated == ["222222222222"]
+        assert store.is_seen("222222222222")
+    finally:
+        store.close()
+
+
+def test_observe_seller_records_error_without_raising(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+
+    class FailingEbay(FakeEbay):
+        async def seller_listings(self, seller: str, *, hydrate: bool = True) -> list[Listing]:
+            raise RuntimeError("eBay search failed")
+
+    service = _observe_service(store, FailingEbay([]))
+    try:
+        store.add_observed_seller("seller_one")
+
+        count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
+
+        assert count == 0
+        rows = store.list_observed_sellers()
+        assert rows[0]["last_error"] == "eBay search failed"
+        assert not store.observed_seller_has_successful_check("seller_one")
+    finally:
+        store.close()
+
+
+def test_observe_interval_for_applies_default_and_floor() -> None:
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+
+    assert service._observe_interval_for({"interval_seconds": None}) == 180
+    assert service._observe_interval_for({"interval_seconds": 600}) == 600
+    assert service._observe_interval_for({"interval_seconds": 5}) == 30
+
+
+def test_observe_sleep_seconds_caps_and_floors() -> None:
+    assert EbaySpyService._observe_sleep_seconds({}, 100.0) == 10.0
+    assert EbaySpyService._observe_sleep_seconds({"a": 103.0}, 100.0) == 3.0
+    assert EbaySpyService._observe_sleep_seconds({"a": 500.0}, 100.0) == 10.0
+    assert EbaySpyService._observe_sleep_seconds({"a": 90.0}, 100.0) == 1.0

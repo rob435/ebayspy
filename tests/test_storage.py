@@ -3,11 +3,14 @@ from pathlib import Path
 from ebayspy.models import Listing
 from ebayspy.storage import (
     Store,
+    format_interval,
+    format_observed_rows,
     format_status_rows,
     is_valid_ebay_username,
     is_valid_telegram_username,
     normalize_ebay_username,
     normalize_telegram_username,
+    parse_interval,
 )
 
 
@@ -243,5 +246,68 @@ def test_rename_seller_updates_watchlist_and_items(tmp_path: Path) -> None:
         assert store.list_sellers() == ["new_name"]
         assert store.recent_active_item_ids("new_name") == ["123"]
         assert not store.rename_seller("new_name", "new_name")
+    finally:
+        store.close()
+
+
+def test_observed_sellers_crud_and_interval(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        assert store.add_observed_seller("Seller_One", interval_seconds=120)
+        assert not store.add_observed_seller("seller_one")  # case-insensitive duplicate
+        assert store.has_observed_seller("SELLER_ONE")
+
+        rows = store.list_observed_sellers()
+        assert [row["username"] for row in rows] == ["Seller_One"]
+        assert rows[0]["interval_seconds"] == 120
+        assert not store.observed_seller_has_successful_check("seller_one")
+
+        assert store.set_observed_interval("seller_one", 300)
+        assert store.list_observed_sellers()[0]["interval_seconds"] == 300
+        assert not store.set_observed_interval("missing", 300)
+
+        store.record_observe_check("seller_one", new_count=2)
+        row = store.list_observed_sellers()[0]
+        assert row["last_new_count"] == 2
+        assert row["last_error"] is None
+        assert store.observed_seller_has_successful_check("seller_one")
+
+        store.record_observe_check("seller_one", new_count=0, error="boom")
+        assert store.list_observed_sellers()[0]["last_error"] == "boom"
+        # A prior successful check is preserved after a later error.
+        assert store.observed_seller_has_successful_check("seller_one")
+
+        assert store.remove_observed_seller("seller_one")
+        assert store.list_observed_sellers() == []
+    finally:
+        store.close()
+
+
+def test_parse_and_format_interval() -> None:
+    assert parse_interval("90") == 90
+    assert parse_interval("90s") == 90
+    assert parse_interval("3m") == 180
+    assert parse_interval("1h") == 3600
+    assert parse_interval("  2 min ") == 120
+    assert parse_interval("") is None
+    assert parse_interval("soon") is None
+
+    assert format_interval(45) == "45s"
+    assert format_interval(180) == "3m"
+    assert format_interval(3600) == "1h"
+
+
+def test_format_observed_rows(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        assert "No observed sellers yet" in format_observed_rows([], 180)
+
+        store.add_observed_seller("seller_one")  # uses default interval
+        store.add_observed_seller("seller_two", interval_seconds=60)
+        store.record_observe_check("seller_one", new_count=1)
+        text = format_observed_rows(store.list_observed_sellers(), 180)
+
+        assert "seller_one: every 3m, 1 new last check" in text
+        assert "seller_two: every 1m" in text
     finally:
         store.close()

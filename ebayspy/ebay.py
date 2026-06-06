@@ -48,8 +48,14 @@ class EbayClient:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def seller_listings(self, seller: str) -> list[Listing]:
+    async def seller_listings(self, seller: str, *, hydrate: bool = True) -> list[Listing]:
         listings = await self._search_seller_listings(seller)
+        if not hydrate:
+            return listings
+        return await self._hydrate_listings(listings)
+
+    async def hydrate_listings(self, listings: list[Listing]) -> list[Listing]:
+        """Fetch per-item detail for a specific subset of listings (e.g. only new ones)."""
         return await self._hydrate_listings(listings)
 
     async def seller_exists(self, seller: str) -> bool | None:
