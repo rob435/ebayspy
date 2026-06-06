@@ -26,6 +26,16 @@ class Store:
                 created_at text not null default current_timestamp
             );
 
+            create table if not exists observed_sellers (
+                username text primary key,
+                interval_seconds integer,
+                created_at text not null default current_timestamp,
+                last_observed_at text,
+                last_ok_at text,
+                last_error text,
+                last_new_count integer not null default 0
+            );
+
             create table if not exists seen_items (
                 item_id text primary key,
                 seller text not null,
@@ -221,6 +231,73 @@ class Store:
     def list_sellers(self) -> list[str]:
         rows = self.conn.execute("select username from sellers order by lower(username)").fetchall()
         return [row["username"] for row in rows]
+
+    def add_observed_seller(self, username: str, interval_seconds: int | None = None) -> bool:
+        username = normalize_ebay_username(username)
+        if not username:
+            return False
+        if self.has_observed_seller(username):
+            return False
+        self.conn.execute(
+            "insert or ignore into observed_sellers(username, interval_seconds) values (?, ?)",
+            (username, interval_seconds),
+        )
+        self.conn.commit()
+        return True
+
+    def has_observed_seller(self, username: str) -> bool:
+        row = self.conn.execute(
+            "select 1 from observed_sellers where lower(username) = lower(?) limit 1", (username,)
+        ).fetchone()
+        return row is not None
+
+    def remove_observed_seller(self, username: str) -> bool:
+        cur = self.conn.execute(
+            "delete from observed_sellers where lower(username) = lower(?)", (username,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def set_observed_interval(self, username: str, interval_seconds: int | None) -> bool:
+        cur = self.conn.execute(
+            "update observed_sellers set interval_seconds = ? where lower(username) = lower(?)",
+            (interval_seconds, username),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def list_observed_sellers(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "select * from observed_sellers order by lower(username)"
+        ).fetchall()
+
+    def observed_seller_has_successful_check(self, username: str) -> bool:
+        row = self.conn.execute(
+            """
+            select 1 from observed_sellers
+            where lower(username) = lower(?)
+              and last_ok_at is not null
+            limit 1
+            """,
+            (username,),
+        ).fetchone()
+        return row is not None
+
+    def record_observe_check(
+        self, username: str, new_count: int, error: str | None = None
+    ) -> None:
+        self.conn.execute(
+            """
+            update observed_sellers set
+                last_observed_at = current_timestamp,
+                last_ok_at = case when ? is null then current_timestamp else last_ok_at end,
+                last_error = ?,
+                last_new_count = ?
+            where lower(username) = lower(?)
+            """,
+            (error, error, new_count, username),
+        )
+        self.conn.commit()
 
     def recent_active_item_ids(self, seller: str, limit: int = 5) -> list[str]:
         rows = self.conn.execute(
@@ -491,6 +568,50 @@ def format_status_rows(rows: list[sqlite3.Row]) -> str:
                 f"{row['username']}: ok, {count} active, {new} new, {ended} ended, checked {checked}"
             )
     return "\n".join(lines)
+
+
+def format_observed_rows(rows: list[sqlite3.Row], default_interval_seconds: int) -> str:
+    if not rows:
+        return "No observed sellers yet. Add one with /observe sellername [interval]."
+    lines = []
+    for row in rows:
+        interval = row["interval_seconds"] or default_interval_seconds
+        every = format_interval(interval)
+        error = row["last_error"]
+        observed = row["last_observed_at"] or "never"
+        if error:
+            lines.append(f"{row['username']}: every {every}, ERROR at {observed}: {error[:120]}")
+        else:
+            new = row["last_new_count"] if row["last_new_count"] is not None else "-"
+            lines.append(
+                f"{row['username']}: every {every}, {new} new last check, checked {observed}"
+            )
+    return "Observing:\n" + "\n".join(lines)
+
+
+def parse_interval(value: str | None) -> int | None:
+    """Parse a human interval like '90', '90s', '3m', or '1h' into seconds."""
+    import re
+
+    text = (value or "").strip().lower()
+    match = re.fullmatch(r"(\d+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?", text)
+    if not match:
+        return None
+    quantity = int(match.group(1))
+    unit = match.group(2) or "s"
+    if unit.startswith("h"):
+        return quantity * 3600
+    if unit.startswith("m"):
+        return quantity * 60
+    return quantity
+
+
+def format_interval(seconds: int) -> str:
+    if seconds and seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds and seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 def normalize_telegram_username(username: str | None) -> str:

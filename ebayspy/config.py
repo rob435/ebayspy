@@ -47,6 +47,9 @@ class Config:
     notify_existing_on_first_run: bool
     http_timeout_seconds: int
     seed_sellers: tuple[str, ...]
+    observe_interval_seconds: int
+    observe_min_interval_seconds: int
+    observe_sellers: tuple[str, ...]
 
     @classmethod
     def load(cls) -> "Config":
@@ -71,6 +74,9 @@ class Config:
             notify_existing_on_first_run=_bool_env("NOTIFY_EXISTING_ON_FIRST_RUN", False),
             http_timeout_seconds=_int_env("HTTP_TIMEOUT_SECONDS", 20),
             seed_sellers=tuple(_csv_env("SELLERS")),
+            observe_interval_seconds=_int_env("OBSERVE_INTERVAL_SECONDS", 180),
+            observe_min_interval_seconds=_int_env("OBSERVE_MIN_INTERVAL_SECONDS", 30),
+            observe_sellers=tuple(_csv_env("OBSERVE_SELLERS")),
         )
 
     def require_telegram(self) -> None:
