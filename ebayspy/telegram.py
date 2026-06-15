@@ -316,27 +316,51 @@ class TelegramBot:
         ending_soon: bool = False,
         trend: str = "",
         demand: str = "",
+        distribution: tuple[float, float, float] | None = None,
+        comps: list[float] | None = None,
+        low_competition: bool = False,
+        risk: str = "",
+        lot_quantity: int | None = None,
+        vision: str = "",
     ) -> None:
         saving = market_price - item.total_price
-        bid_note = " current bid" if item.is_auction else ""
-        price_line = (
-            f"💰 {html.escape(format_money(item.total_price, item.currency))}{bid_note}"
-        )
-        if item.shipping_cost:
-            price_line += (
-                f" (incl. {html.escape(format_money(item.shipping_cost, item.currency))} shipping)"
+        cur = item.currency
+        if lot_quantity:
+            per_unit = item.total_price / lot_quantity
+            unit_market = market_price / lot_quantity
+            price_line = (
+                f"💰 {html.escape(format_money(item.total_price, cur))} for {lot_quantity} units"
+                f" (≈ {html.escape(format_money(per_unit, cur))}/unit)"
             )
-        # When the watch spans variants, the market figure is for this item's own
-        # variant (e.g. 256GB), so the comparison is always like-for-like.
-        market_label = f"📊 Market ≈ {html.escape(format_money(market_price, item.currency))}"
-        if variant:
-            market_label += f" for {html.escape(variant)}"
-        if ending_soon:
-            header = "⏰ AUCTION ENDING SOON"
-        elif item.is_auction:
-            header = "🔨 AUCTION DEAL"
+            market_label = (
+                f"📊 Lot worth ≈ {html.escape(format_money(market_price, cur))}"
+                f" ({html.escape(format_money(unit_market, cur))}/unit market)"
+            )
+            header = "📦 LOT DEAL"
         else:
-            header = "💸 DEAL FOUND"
+            bid_note = " current bid" if item.is_auction else ""
+            price_line = f"💰 {html.escape(format_money(item.total_price, cur))}{bid_note}"
+            if item.shipping_cost:
+                price_line += (
+                    f" (incl. {html.escape(format_money(item.shipping_cost, cur))} shipping)"
+                )
+            # When the watch spans variants, the market figure is for this item's
+            # own variant (e.g. 256GB), so the comparison is always like-for-like.
+            market_label = f"📊 Market ≈ {html.escape(format_money(market_price, cur))}"
+            if variant:
+                market_label += f" for {html.escape(variant)}"
+            if distribution:
+                low, _mid, high = distribution
+                market_label += (
+                    f" (range {html.escape(format_money(low, cur))}"
+                    f"–{html.escape(format_money(high, cur))})"
+                )
+            if ending_soon:
+                header = "⏰ AUCTION ENDING SOON"
+            elif item.is_auction:
+                header = "🔨 AUCTION DEAL"
+            else:
+                header = "💸 DEAL FOUND"
         parts = [
             f"<b>{header}</b>",
             html.escape(f"{discount_percent:.0f}% below market on “{query}”"),
@@ -352,6 +376,9 @@ class TelegramBot:
             parts.append(
                 f"💵 Est. flip profit ≈ {html.escape(format_money(profit, item.currency))}{roi_text}"
             )
+        if comps:
+            joined = " · ".join(format_money(price, item.currency) for price in comps)
+            parts.append(f"🧾 Recently sold: {html.escape(joined)}")
         if trend:
             parts.append(html.escape(trend))
         if demand:
@@ -362,8 +389,12 @@ class TelegramBot:
             ends = format_timestamp(item.end_date)
             bids = f"{item.bid_count} bid(s)" if item.bid_count is not None else "no bids yet"
             parts.append(f"⏰ Ends {html.escape(ends)} · {bids}" if ends else f"⏰ {bids}")
+            if low_competition:
+                parts.append("🏁 Low competition — win it uncontested")
         if item.condition:
             parts.append(f"🏷️ {html.escape(item.condition)}")
+        if vision:
+            parts.append(html.escape(vision))
         specs = _spec_line(item.aspects)
         if specs:
             parts.append(f"📋 {html.escape(specs)}")
@@ -375,6 +406,8 @@ class TelegramBot:
         listed = format_timestamp(item.listed_at)
         if listed:
             parts.append(f"🕒 Listed {html.escape(listed)}")
+        if risk:
+            parts.append(html.escape(risk))
         parts.append("")
         parts.append(f'🔗 <a href="{html.escape(item.url)}">Buy on eBay</a>')
         await self._deliver(

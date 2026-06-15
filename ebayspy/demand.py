@@ -54,7 +54,14 @@ def summarize(stats: dict, *, window_days: int, min_events: int) -> tuple[str, s
     else:
         emoji, label = "🐌", "Slow"
 
-    clear_txt = f"~{days_to_clear:.0f}d to clear supply" if days_to_clear else "barely selling"
+    # ``days_to_clear`` is None only in the Cold case (no disappearances); 0.0
+    # means supply has already fully cleared (Hot). Guard on None so a cleared-out
+    # market doesn't read as the contradictory "Hot … barely selling".
+    clear_txt = (
+        f"~{days_to_clear:.0f}d to clear supply"
+        if days_to_clear is not None
+        else "barely selling"
+    )
     tag = f"{emoji} Demand: {label} ({per_week:.0f}/wk, {clear_txt})"
 
     bits = [tag]

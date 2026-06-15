@@ -5,9 +5,18 @@ from ebayspy.market import (
     estimate_resale_profit,
     find_deals,
     market_price,
+    price_distribution,
     variant_label,
 )
 from ebayspy.models import MarketItem
+
+
+def test_price_distribution() -> None:
+    p10, p50, p90 = price_distribution(range(1, 101))  # 1..100
+    assert round(p50) == 50
+    assert p10 < p50 < p90
+    assert price_distribution([]) is None
+    assert price_distribution([42]) == (42, 42, 42)
 
 
 def _item(item_id: str, total: float, title: str | None = None) -> MarketItem:

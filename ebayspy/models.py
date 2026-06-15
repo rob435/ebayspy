@@ -43,6 +43,7 @@ class MarketItem:
     current_bid: float | None = None
     bid_count: int | None = None
     end_date: str | None = None
+    item_location: str = ""
     # Populated only when an item is hydrated via getItem (structured catalog data).
     epid: str = ""
     gtin: str = ""

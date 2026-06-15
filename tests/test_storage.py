@@ -354,6 +354,29 @@ def test_market_deal_alert_dedupe(tmp_path: Path) -> None:
         store.close()
 
 
+def test_market_deal_alert_stage_progression(tmp_path: Path) -> None:
+    # An auction alerts as "deal", then again as "final" when it nears its end.
+    # Recording "final" must not let an earlier "deal" re-fire, even though the
+    # table keeps a single row per item (e.g. if the snipe window briefly lapses
+    # due to clock skew or a relisted item id).
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+
+        # First sighting: deal stage fires, final stage still open.
+        assert store.deal_already_alerted(watch_id, "auc-1", "deal") is False
+        store.record_deal_alert(watch_id, "auc-1", price=300.0, stage="deal")
+        assert store.deal_already_alerted(watch_id, "auc-1", "deal") is True
+        assert store.deal_already_alerted(watch_id, "auc-1", "final") is False
+
+        # Snipe window: final fires once, then both stages are suppressed.
+        store.record_deal_alert(watch_id, "auc-1", price=280.0, stage="final")
+        assert store.deal_already_alerted(watch_id, "auc-1", "final") is True
+        assert store.deal_already_alerted(watch_id, "auc-1", "deal") is True
+    finally:
+        store.close()
+
+
 def test_market_health_alert_fires_once_then_recovers(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     try:

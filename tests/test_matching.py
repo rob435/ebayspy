@@ -154,6 +154,15 @@ def test_attributes_extracts_capacity_colour_qualifiers() -> None:
     assert attributes("fits 128GB and 256GB models")["capacity"] is None
 
 
+def test_colour_spelling_synonyms_fold_together() -> None:
+    # UK "grey" and US "gray" name the same colour; both must canonicalize so a
+    # query in one spelling still matches a listing in the other.
+    assert attributes("iPhone 13 Gray")["colour"] == "grey"
+    assert attributes("iPhone 13 Grey")["colour"] == "grey"
+    assert is_comparable("iphone 13 grey", "Apple iPhone 13 128GB Gray")
+    assert is_comparable("iphone 13 gray", "Apple iPhone 13 128GB Grey")
+
+
 def test_specified_dimensions() -> None:
     assert specified_dimensions("iphone 13 256gb blue") == {"capacity", "colour"}
     assert specified_dimensions("iphone 13 pro") == {"qualifier"}

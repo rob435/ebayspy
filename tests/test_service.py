@@ -84,8 +84,43 @@ class FakeTelegram:
         ending_soon: bool = False,
         trend: str = "",
         demand: str = "",
+        distribution=None,
+        comps=None,
+        low_competition: bool = False,
+        risk: str = "",
+        lot_quantity: int | None = None,
+        vision: str = "",
     ) -> None:
         self.deals.append((chat_id, item.item_id, item.total_price))
+
+
+class FlakyTelegram(FakeTelegram):
+    """Telegram double whose sends raise while ``fail`` is set, then record.
+
+    Used to prove that a failed delivery is retried on the next poll rather than
+    being silently marked as alerted/seen/ended.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = True
+
+    async def notify_listing(self, chat_id: str, listing: Listing) -> None:
+        if self.fail:
+            raise RuntimeError("telegram down")
+        await super().notify_listing(chat_id, listing)
+
+    async def notify_ended_listing(
+        self, chat_id: str, listing: Listing, ended_at: str | None = None
+    ) -> None:
+        if self.fail:
+            raise RuntimeError("telegram down")
+        await super().notify_ended_listing(chat_id, listing, ended_at)
+
+    async def notify_deal(self, chat_id: str, item, **kwargs) -> None:
+        if self.fail:
+            raise RuntimeError("telegram down")
+        await super().notify_deal(chat_id, item, **kwargs)
 
 
 def _service_config() -> SimpleNamespace:
@@ -115,6 +150,8 @@ def _service_config() -> SimpleNamespace:
         market_hydrate=True,
         market_hydrate_limit=20,
         market_price_source="listings",
+        market_vision=False,
+        market_vision_match_threshold=0.18,
         market_min_dispersion=0.12,
         market_deal_scan=False,
         market_resale_fee_percent=12.8,
@@ -122,12 +159,16 @@ def _service_config() -> SimpleNamespace:
         market_auctions_default=False,
         market_snipe_window_seconds=600,
         market_turbo_interval_seconds=45,
+        market_low_bid_count=1,
+        market_nobid_discount_percent=5,
         market_demand_grace_seconds=86400,
         market_demand_window_days=14,
         market_demand_min_events=3,
         market_arbitrage_threshold=20.0,
         market_arbitrage_interval_seconds=3600,
         market_health_threshold=5,
+        market_risk_warn=40,
+        market_risk_max=100,
         fx_rates=(),
         ebay_global_id="EBAY-GB",
         market_aliases=(),
@@ -644,7 +685,7 @@ def test_check_market_watch_prices_each_variant_separately(tmp_path: Path) -> No
         store.close()
 
 
-def _auction(item_id: str, bid_total: float, ends_in: int) -> MarketItem:
+def _auction(item_id: str, bid_total: float, ends_in: int, bid_count: int | None = None) -> MarketItem:
     end = (datetime.now(timezone.utc) + timedelta(seconds=ends_in)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
@@ -658,8 +699,28 @@ def _auction(item_id: str, bid_total: float, ends_in: int) -> MarketItem:
         total_price=bid_total,
         buying_options=("AUCTION",),
         current_bid=bid_total,
+        bid_count=bid_count,
         end_date=end,
     )
+
+
+def test_no_bid_auction_alerts_at_relaxed_threshold(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    # Market ~400. A no-bid auction at 380 (only 5% below) would NOT clear the
+    # normal 15% threshold, but qualifies under the relaxed no-competition rule.
+    items = [_market_item(f"f{i}", 400 + i, "Apple iPhone 13") for i in range(6)]
+    items.append(_auction("nobid", 380, ends_in=300, bid_count=0))
+    ebay.market_items = items
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13", include_auctions=True)
+        sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+
+        assert sent == 1
+        assert {item_id for _, item_id, _ in service.telegram.deals} == {"nobid"}
+    finally:
+        store.close()
 
 
 def test_auction_sniping_two_stage_and_turbo(tmp_path: Path) -> None:
@@ -735,6 +796,25 @@ def test_insights_overrides_price_with_sold_median(tmp_path: Path) -> None:
         assert sent == 1
         row = store.get_market_watch(watch_id)
         assert 360 <= row["market_price"] <= 366  # sold median, not the ~402 live asking
+    finally:
+        store.close()
+
+
+def test_lot_arbitrage_values_per_unit(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    # Single-unit market ~400. A job lot of 5 at 1400 = £280/unit -> 30% under,
+    # worth ~£2000 as units. Normal matching would exclude the lot entirely.
+    items = [_market_item(f"u{i}", 400 + i, "Apple iPhone 13") for i in range(6)]
+    items.append(_market_item("lot", 1400, "Job Lot x5 Apple iPhone 13 Bundle"))
+    ebay.market_items = items
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13", include_lots=True)
+        sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+
+        assert sent == 1
+        assert {item_id for _, item_id, _ in service.telegram.deals} == {"lot"}
     finally:
         store.close()
 
@@ -824,5 +904,137 @@ def test_handle_watch_parses_options(tmp_path: Path) -> None:
         removed = service._handle_unwatch(str(row["id"]))
         assert "Stopped watching" in removed
         assert store.list_market_watches() == []
+    finally:
+        store.close()
+
+
+def test_new_listing_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    telegram = FlakyTelegram()
+    service.telegram = telegram
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        existing = Listing(
+            item_id="111111111111",
+            seller="seller_one",
+            title="Existing",
+            price="GBP 5.00",
+            url="https://example.test/itm/111111111111",
+        )
+        store.mark_seen(existing, notified=False)
+        store.upsert_active_listings([existing])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+
+        fresh = Listing(
+            item_id="222222222222",
+            seller="seller_one",
+            title="Brand new",
+            price="GBP 9.00",
+            url="https://example.test/itm/222222222222",
+        )
+        service.ebay = FakeEbay([fresh, existing])
+
+        # Telegram is down: the alert fails and the item must stay unseen so it
+        # is retried, not silently lost.
+        count = asyncio.run(service.check_once())
+        assert count == 0
+        assert telegram.listings == []
+        assert not store.is_seen("222222222222")
+
+        # Telegram recovers: the next poll re-sends and only now marks it seen.
+        telegram.fail = False
+        count = asyncio.run(service.check_once())
+        assert count == 1
+        assert telegram.listings == [("chat-1", "222222222222")]
+        assert store.is_seen("222222222222")
+    finally:
+        store.close()
+
+
+def test_ended_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.max_items_per_seller = 10
+    service.config = config
+    service.store = store
+    telegram = FlakyTelegram()
+    service.telegram = telegram
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        still_active = Listing(
+            item_id="100000000001",
+            seller="seller_one",
+            title="Still active",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000001",
+        )
+        gone = Listing(
+            item_id="100000000002",
+            seller="seller_one",
+            title="Now gone",
+            price="GBP 1.00",
+            url="https://example.test/itm/100000000002",
+        )
+        for listing in (still_active, gone):
+            store.mark_seen(listing, notified=False)
+        store.upsert_active_listings([still_active, gone])
+        store.record_check("seller_one", listing_count=2, new_count=0)
+
+        # item_ended_state returns (active=False) -> genuinely ended.
+        service.ebay = FakeEbay([still_active])
+
+        # First poll: the ended alert send fails, so the item must remain a
+        # candidate (not marked ended-notified) for the next poll.
+        count = asyncio.run(service.check_once())
+        assert count == 0
+        assert telegram.ended == []
+
+        # Telegram recovers: the ended alert fires exactly once on retry.
+        telegram.fail = False
+        count = asyncio.run(service.check_once())
+        assert count == 1
+        assert telegram.ended == [("chat-1", "100000000002")]
+    finally:
+        store.close()
+
+
+def test_market_deal_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [
+        _market_item("great", 150, title),
+        _market_item("mkt-a", 190, title),
+        _market_item("mkt-b", 200, title),
+        _market_item("mkt-c", 210, title),
+        _market_item("mkt-d", 250, title),
+    ]
+    service = _market_service(store, ebay)
+    telegram = FlakyTelegram()
+    service.telegram = telegram
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+
+        # Telegram is down: the deal is not recorded as alerted, so it stays
+        # actionable instead of being permanently suppressed.
+        sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+        assert sent == 0
+        assert telegram.deals == []
+        assert store.deal_already_alerted(watch_id, "great") is False
+
+        # Telegram recovers: the deal alerts on the next check.
+        telegram.fail = False
+        sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+        assert sent == 1
+        assert [item_id for _, item_id, _ in telegram.deals] == ["great"]
+        assert store.deal_already_alerted(watch_id, "great") is True
     finally:
         store.close()

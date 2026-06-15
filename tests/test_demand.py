@@ -39,3 +39,15 @@ def test_slow_market_when_barely_sells() -> None:
     )
     assert "🐌" in tag and "Slow" in tag
     assert "to clear" in detail
+
+
+def test_cleared_out_supply_reads_hot_not_barely_selling() -> None:
+    # Supply has fully cleared (0 active) while sales kept coming: days_to_clear
+    # is 0.0, which must read as Hot, not the contradictory "barely selling".
+    tag, _ = summarize(
+        _stats(active_count=0, ended_in_window=14, history_days=20),
+        window_days=14, min_events=3,
+    )
+    assert "🔥" in tag and "Hot" in tag
+    assert "barely selling" not in tag
+    assert "to clear supply" in tag

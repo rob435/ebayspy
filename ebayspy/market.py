@@ -12,7 +12,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Callable, Iterable
 
-from .matching import COLOURS, attributes, normalize_capacity
+from .matching import attributes, canonical_colours, normalize_capacity
 from .models import MarketItem
 
 # Considered in reading order for the variant label. Each dimension is included
@@ -46,6 +46,24 @@ def market_price(totals: Iterable[float]) -> float | None:
         if rough * TRIM_LOW_RATIO <= value <= rough * TRIM_HIGH_RATIO
     ]
     return statistics.median(trimmed) if trimmed else rough
+
+
+def price_distribution(values: Iterable[float]) -> tuple[float, float, float] | None:
+    """Return (p10, p50, p90) of the prices, or None when empty — shows the buyer
+    the spread (how good the deal is) and the resale ceiling, not just the median."""
+    ordered = sorted(value for value in values if value and value > 0)
+    if not ordered:
+        return None
+
+    def percentile(fraction: float) -> float:
+        if len(ordered) == 1:
+            return ordered[0]
+        rank = (len(ordered) - 1) * fraction
+        low = int(rank)
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
+
+    return percentile(0.10), percentile(0.50), percentile(0.90)
 
 
 def find_deals(
@@ -142,7 +160,7 @@ def _item_variant(item: MarketItem, dimension: str) -> str | None:
     elif dimension == "colour":
         for name in _COLOUR_ASPECTS:
             if name in aspects:
-                colours = {t for t in aspects[name].lower().split() if t in COLOURS}
+                colours = canonical_colours(set(aspects[name].lower().split()))
                 if colours:
                     return ",".join(sorted(colours))
     return attributes(item.title).get(dimension)  # type: ignore[return-value]
