@@ -1,8 +1,12 @@
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ebayspy.models import Listing
 from ebayspy.storage import (
     Store,
+    _parse_price_amount,
+    format_health_rows,
     format_interval,
     format_market_rows,
     format_observed_rows,
@@ -14,6 +18,15 @@ from ebayspy.storage import (
     normalize_telegram_username,
     parse_interval,
 )
+
+
+def test_store_uses_wal_journal(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        mode = store.conn.execute("pragma journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+    finally:
+        store.close()
 
 
 def test_store_sellers_seen_items_and_status(tmp_path: Path) -> None:
@@ -511,3 +524,140 @@ def test_format_observed_rows(tmp_path: Path) -> None:
         assert "seller_two: every 1m" in text
     finally:
         store.close()
+
+
+def _active(item_id: str, price: str) -> Listing:
+    return Listing(
+        item_id=item_id, seller="seller_one", title=f"Item {item_id}", price=price,
+        url=f"https://example.test/itm/{item_id}",
+    )
+
+
+def test_parse_price_amount_handles_codes_and_symbols() -> None:
+    assert _parse_price_amount("430.00 GBP") == (430.0, "GBP")
+    assert _parse_price_amount("GBP 9.00") == (9.0, "GBP")
+    assert _parse_price_amount("$10.00") == (10.0, "USD")
+    assert _parse_price_amount("£5.00") == (5.0, "GBP")
+    assert _parse_price_amount("1,234.50 USD") == (1234.5, "USD")
+    assert _parse_price_amount("") is None
+    assert _parse_price_amount("Unknown") is None
+
+
+def test_price_drop_candidates_threshold_and_new_item(tmp_path) -> None:
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        store.upsert_active_listings([
+            _active("i1", "100.00 GBP"), _active("i2", "50.00 GBP"), _active("i3", "10.00 GBP"),
+        ])
+        drops = store.price_drop_candidates([
+            _active("i1", "80.00 GBP"),   # 20% -> qualifies
+            _active("i2", "49.00 GBP"),   # 2% -> below 5% threshold
+            _active("i3", "10.00 GBP"),   # unchanged
+            _active("i4", "5.00 GBP"),    # not previously active
+        ], min_drop_percent=5)
+        assert [(d[0].item_id, d[1], d[2]) for d in drops] == [("i1", 100.0, 80.0)]
+        assert round(drops[0][3]) == 20
+    finally:
+        store.close()
+
+
+def test_price_drop_dedup_against_last_alerted(tmp_path) -> None:
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        store.upsert_active_listings([_active("i1", "100.00 GBP")])
+        assert store.price_drop_candidates([_active("i1", "80.00 GBP")], 5)
+        store.mark_price_drop_alerted("i1", 80.0)
+        # Wobble back up above the floor -> no re-alert.
+        assert store.price_drop_candidates([_active("i1", "85.00 GBP")], 5) == []
+        # Falls further below the floor -> alerts again.
+        assert store.price_drop_candidates([_active("i1", "70.00 GBP")], 5)
+    finally:
+        store.close()
+
+
+def test_price_drop_ignores_currency_change(tmp_path) -> None:
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        store.upsert_active_listings([_active("i1", "100.00 GBP")])
+        assert store.price_drop_candidates([_active("i1", "50.00 USD")], 5) == []
+    finally:
+        store.close()
+
+
+def test_backup_creates_reopenable_snapshot(tmp_path) -> None:
+    store = Store(tmp_path / "db.sqlite3")
+    try:
+        store.add_seller("seller_one")
+        store.mark_seen(_active("123", "10.00 GBP"), notified=True)
+        snap = store.backup(tmp_path / "backups", keep=7)
+        assert snap.exists() and snap.parent == tmp_path / "backups"
+    finally:
+        store.close()
+    reopened = Store(snap)
+    try:
+        assert reopened.list_sellers() == ["seller_one"]
+        assert reopened.is_seen("123")
+    finally:
+        reopened.close()
+    con = sqlite3.connect(snap)
+    assert con.execute("select username from sellers").fetchall() == [("seller_one",)]
+    con.close()
+
+
+def test_backup_prunes_to_keep(tmp_path) -> None:
+    store = Store(tmp_path / "db.sqlite3")
+    dest = tmp_path / "backups"
+    try:
+        store.add_seller("seller_one")
+        made = [store.backup(dest, keep=2) for _ in range(4)]
+    finally:
+        store.close()
+    survivors = sorted(dest.glob("db-*.sqlite3"))
+    assert len(survivors) == 2
+    assert survivors == sorted(made)[-2:]  # newest kept
+
+
+def test_market_feedback_records_counts_and_purges(tmp_path) -> None:
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        wid = store.add_market_watch("iphone 13")
+        store.record_feedback(wid, "i1", "bad")
+        store.record_feedback(wid, "i2", "good")
+        assert store.feedback_counts(wid) == (1, 1)
+        store.remove_market_watch(wid)
+        assert store.feedback_counts(wid) == (0, 0)
+    finally:
+        store.close()
+
+
+def test_discount_nudge_bumps_and_clamps(tmp_path) -> None:
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        wid = store.add_market_watch("iphone 13")
+        assert store.get_discount_nudge(wid) == 0.0
+        assert store.bump_discount_nudge(wid, 2.0, -10, 10) == 2.0
+        store.bump_discount_nudge(wid, 2.0, -10, 10)
+        assert store.bump_discount_nudge(wid, 20.0, -10, 10) == 10.0   # clamped high
+        assert store.bump_discount_nudge(wid, -50.0, -10, 10) == -10.0  # clamped low
+    finally:
+        store.close()
+
+
+def test_format_health_rows_handles_naive_and_missing_timestamps() -> None:
+    started = datetime.now(timezone.utc)
+    # Missing last poll -> "never", not a crash.
+    assert "never" in format_health_rows(
+        {"last_poll_ok_at": None, "seller_count": 0, "watch_count": 0},
+        started_at=started, heartbeat_enabled=False,
+    )
+    # A naive (offset-less) timestamp must not raise TypeError (aware - naive).
+    naive = format_health_rows(
+        {"last_poll_ok_at": "2026-06-15T10:00:00", "seller_count": 1, "watch_count": 1},
+        started_at=started, heartbeat_enabled=True,
+    )
+    assert "uptime" in naive and "ago" in naive
+    # Garbage timestamp -> "unknown", not a crash.
+    assert "unknown" in format_health_rows(
+        {"last_poll_ok_at": "not-a-date", "seller_count": 0, "watch_count": 0},
+        started_at=started, heartbeat_enabled=False,
+    )

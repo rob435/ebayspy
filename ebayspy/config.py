@@ -1,31 +1,61 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+log = logging.getLogger(__name__)
+
+_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+_FALSE_VALUES = {"0", "false", "no", "n", "off"}
+
 
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None or value == "":
         return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    # Fall back to the default (not False) so a typo like MARKET_HYDRATE=ture
+    # doesn't silently disable a default-on feature — just warn loudly.
+    log.warning("%s=%r is not a recognized boolean; using default %s (use true/false).", name, value, default)
+    return default
 
 
 def _int_env(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None or value == "":
         return default
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number, got {value!r}") from None
 
 
 def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or value == "":
         return default
-    return float(value)
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+
+
+def _source_env(name: str, default: str, allowed: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower() or default
+    if value not in allowed:
+        log.warning(
+            "%s=%r is not one of %s; using %r.", name, value, sorted(allowed), default
+        )
+        return default
+    return value
 
 
 def _market_watches_env(name: str) -> list[str]:
@@ -120,6 +150,28 @@ class Config:
     market_health_threshold: int
     market_risk_warn: int
     market_risk_max: int
+    # Price-drop alerts on watched sellers' still-active listings.
+    seller_price_drop_percent: int
+    # Best-offer-aware deal detection.
+    market_offer_aware: bool
+    market_expected_offer_discount: float
+    # vision++ extra classifiers (CLIP, optional).
+    market_vision_stock_threshold: float
+    market_vision_damage_threshold: float
+    market_vision_count_hint: bool
+    market_vision_count_threshold: float
+    # Feedback loop (👍/👎 on deals tunes the per-watch discount threshold).
+    market_feedback_enabled: bool
+    market_feedback_step: float
+    market_feedback_relax_step: float
+    market_feedback_max_nudge: float
+    # Health heartbeat.
+    heartbeat_enabled: bool
+    heartbeat_interval_seconds: int
+    # State backup (online SQLite snapshots).
+    backup_dir: Path
+    backup_keep: int
+    backup_interval_seconds: int
     fx_rates: tuple[tuple[str, float], ...]
     market_aliases: tuple[tuple[str, str], ...]
     market_watches: tuple[str, ...]
@@ -166,8 +218,8 @@ class Config:
             market_semantic_threshold=_float_env("MARKET_SEMANTIC_THRESHOLD", 0.6),
             market_hydrate=_bool_env("MARKET_HYDRATE", True),
             market_hydrate_limit=_int_env("MARKET_HYDRATE_LIMIT", 20),
-            market_price_source=(
-                os.getenv("MARKET_PRICE_SOURCE", "listings").strip().lower() or "listings"
+            market_price_source=_source_env(
+                "MARKET_PRICE_SOURCE", "listings", {"listings", "insights"}
             ),
             market_vision=_bool_env("MARKET_VISION", False),
             market_vision_match_threshold=_float_env("MARKET_VISION_MATCH_THRESHOLD", 0.18),
@@ -188,6 +240,22 @@ class Config:
             market_health_threshold=_int_env("MARKET_HEALTH_THRESHOLD", 5),
             market_risk_warn=_int_env("MARKET_RISK_WARN", 40),
             market_risk_max=_int_env("MARKET_RISK_MAX", 100),
+            seller_price_drop_percent=_int_env("SELLER_PRICE_DROP_PERCENT", 5),
+            market_offer_aware=_bool_env("MARKET_OFFER_AWARE", False),
+            market_expected_offer_discount=_float_env("MARKET_EXPECTED_OFFER_DISCOUNT", 10.0),
+            market_vision_stock_threshold=_float_env("MARKET_VISION_STOCK_THRESHOLD", 0.55),
+            market_vision_damage_threshold=_float_env("MARKET_VISION_DAMAGE_THRESHOLD", 0.55),
+            market_vision_count_hint=_bool_env("MARKET_VISION_COUNT_HINT", False),
+            market_vision_count_threshold=_float_env("MARKET_VISION_COUNT_THRESHOLD", 0.55),
+            market_feedback_enabled=_bool_env("MARKET_FEEDBACK_ENABLED", True),
+            market_feedback_step=_float_env("MARKET_FEEDBACK_STEP", 2.0),
+            market_feedback_relax_step=_float_env("MARKET_FEEDBACK_RELAX_STEP", 1.0),
+            market_feedback_max_nudge=_float_env("MARKET_FEEDBACK_MAX_NUDGE", 10.0),
+            heartbeat_enabled=_bool_env("HEARTBEAT_ENABLED", False),
+            heartbeat_interval_seconds=_int_env("HEARTBEAT_INTERVAL_SECONDS", 86400),
+            backup_dir=Path(os.getenv("BACKUP_DIR", "backups")),
+            backup_keep=_int_env("BACKUP_KEEP", 7),
+            backup_interval_seconds=_int_env("BACKUP_INTERVAL_SECONDS", 86400),
             fx_rates=tuple(_fx_rates_env("FX_RATES")),
             market_aliases=tuple(_aliases_env("ALIASES")),
             market_watches=tuple(_market_watches_env("MARKET_WATCHES")),

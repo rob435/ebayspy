@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -16,6 +17,13 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # WAL lets a reader and a writer proceed concurrently and avoids most
+        # "database is locked" failures; busy_timeout waits out the rare
+        # contention instead of erroring; synchronous=NORMAL is the safe, faster
+        # companion to WAL. All idempotent.
+        self.conn.execute("pragma journal_mode=WAL")
+        self.conn.execute("pragma busy_timeout=5000")
+        self.conn.execute("pragma synchronous=NORMAL")
         self.migrate()
 
     def migrate(self) -> None:
@@ -62,7 +70,8 @@ class Store:
                 first_seen_at text not null default current_timestamp,
                 last_seen_at text not null default current_timestamp,
                 ended_at text,
-                ended_notified_at text
+                ended_notified_at text,
+                last_drop_alert_price text
             );
 
             create table if not exists telegram_chats (
@@ -111,7 +120,8 @@ class Store:
                 last_deal_count integer not null default 0,
                 consecutive_errors integer not null default 0,
                 consecutive_empty integer not null default 0,
-                health_alerted integer not null default 0
+                health_alerted integer not null default 0,
+                discount_nudge real not null default 0
             );
 
             create table if not exists market_deal_alerts (
@@ -162,6 +172,31 @@ class Store:
             );
             create index if not exists idx_market_listings
                 on market_listings(watch_id, ended_at);
+
+            create table if not exists market_feedback (
+                id integer primary key autoincrement,
+                watch_id integer not null,
+                item_id text not null,
+                verdict text not null,
+                category_id text,
+                created_at text not null default current_timestamp
+            );
+            create index if not exists idx_market_feedback
+                on market_feedback(watch_id, verdict);
+
+            -- Back the case-insensitive seller/username lookups run on every
+            -- poll; without these the lower(...) wrapper defeats the primary
+            -- keys and each query full-scans tables that grow unbounded.
+            create index if not exists idx_seen_items_seller_lower
+                on seen_items(lower(seller));
+            create index if not exists idx_active_items_seller_lower
+                on active_items(lower(seller));
+            create index if not exists idx_sellers_username_lower
+                on sellers(lower(username));
+            create index if not exists idx_observed_sellers_username_lower
+                on observed_sellers(lower(username));
+            create index if not exists idx_seller_checks_username_lower
+                on seller_checks(lower(username));
             """
         )
         self.conn.commit()
@@ -186,6 +221,7 @@ class Store:
             "seller_feedback_score": "text not null default ''",
             "ended_at": "text",
             "ended_notified_at": "text",
+            "last_drop_alert_price": "text",
         }
         for column, definition in active_defaults.items():
             if column not in active_columns:
@@ -211,6 +247,7 @@ class Store:
             "consecutive_errors": "integer not null default 0",
             "consecutive_empty": "integer not null default 0",
             "health_alerted": "integer not null default 0",
+            "discount_nudge": "real not null default 0",
         }
         for column, definition in market_defaults.items():
             if column not in market_columns:
@@ -294,6 +331,34 @@ class Store:
 
     def close(self) -> None:
         self.conn.close()
+
+    def backup(self, dest_dir: Path | str, keep: int = 7) -> Path:
+        """Write a consistent timestamped snapshot of the DB and prune old ones.
+
+        Uses SQLite's online backup API, so it is safe to run against the live
+        connection while the tracker is polling (unlike copying the file, which
+        could capture a torn write under WAL).
+        """
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        # Microsecond precision keeps filenames unique (and lexical == chronological).
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        target = dest / f"{self.path.stem}-{stamp}.sqlite3"
+        self.conn.commit()
+        snapshot = sqlite3.connect(target)
+        try:
+            self.conn.backup(snapshot)
+        finally:
+            snapshot.close()  # a `with` block commits but does NOT close the connection
+        self._prune_backups(dest, keep)
+        return target
+
+    def _prune_backups(self, dest: Path, keep: int) -> None:
+        if keep <= 0:  # keep all
+            return
+        snapshots = sorted(dest.glob(f"{self.path.stem}-*.sqlite3"))
+        for old in snapshots[:-keep]:
+            old.unlink(missing_ok=True)
 
     def add_seller(self, username: str) -> bool:
         username = normalize_ebay_username(username)
@@ -483,6 +548,7 @@ class Store:
             "market_muted_variants",
             "market_price_history",
             "market_listings",
+            "market_feedback",
         ):
             self.conn.execute(f"delete from {table} where watch_id = ?", (watch_id,))
         self.conn.commit()
@@ -583,7 +649,10 @@ class Store:
     # an already-recorded later stage as covering an earlier one. Without this, an
     # auction that progressed deal→final could re-fire its "deal" alert if it ever
     # briefly left the snipe window again (clock skew / relisted item id).
-    _STAGE_RANK = {"deal": 0, "lot": 0, "final": 1}
+    # "offer" ranks below "deal" so recording an offer-candidate alert never
+    # suppresses a later genuine list-price "deal", but a recorded "deal" does
+    # suppress a repeat "offer".
+    _STAGE_RANK = {"offer": -1, "deal": 0, "lot": 0, "final": 1}
 
     def deal_already_alerted(self, watch_id: int, item_id: str, stage: str = "deal") -> bool:
         row = self.conn.execute(
@@ -649,6 +718,40 @@ class Store:
             "select variant from market_muted_variants where watch_id = ?", (watch_id,)
         ).fetchall()
         return {row["variant"] for row in rows}
+
+    def record_feedback(
+        self, watch_id: int, item_id: str, verdict: str, category_id: str | None = None
+    ) -> None:
+        self.conn.execute(
+            "insert into market_feedback(watch_id, item_id, verdict, category_id) "
+            "values (?, ?, ?, ?)",
+            (watch_id, item_id, verdict, category_id),
+        )
+        self.conn.commit()
+
+    def feedback_counts(self, watch_id: int) -> tuple[int, int]:
+        """(good_count, bad_count) of recorded feedback for a watch."""
+        rows = self.conn.execute(
+            "select verdict, count(*) as n from market_feedback where watch_id = ? group by verdict",
+            (watch_id,),
+        ).fetchall()
+        counts = {row["verdict"]: row["n"] for row in rows}
+        return counts.get("good", 0), counts.get("bad", 0)
+
+    def get_discount_nudge(self, watch_id: int) -> float:
+        row = self.conn.execute(
+            "select discount_nudge from market_watches where id = ?", (watch_id,)
+        ).fetchone()
+        return float(row["discount_nudge"]) if row is not None else 0.0
+
+    def bump_discount_nudge(self, watch_id: int, delta: float, lo: float, hi: float) -> float:
+        """Adjust the per-watch discount nudge by ``delta``, clamped to [lo, hi]."""
+        new = max(lo, min(hi, self.get_discount_nudge(watch_id) + delta))
+        self.conn.execute(
+            "update market_watches set discount_nudge = ? where id = ?", (new, watch_id)
+        )
+        self.conn.commit()
+        return new
 
     def record_price_sample(self, watch_id: int, variant: str | None, price: float) -> None:
         self.conn.execute(
@@ -1044,6 +1147,51 @@ class Store:
                 increases.append((listing, previous_quantity, current_quantity))
         return increases
 
+    def price_drop_candidates(
+        self, listings: list[Listing], min_drop_percent: float = 0.0
+    ) -> list[tuple[Listing, float, float, float]]:
+        """Active listings whose price fell at least ``min_drop_percent`` below the
+        price stored from the previous scan, deduped against the last-alerted price.
+
+        Returns (listing, old_price, new_price, drop_percent). Only items already
+        tracked in active_items qualify (a brand-new item is the new-listing path's
+        job), and a drop fires once unless the price later falls further still. Must
+        be called BEFORE upsert_active_listings overwrites active_items.price.
+        """
+        drops: list[tuple[Listing, float, float, float]] = []
+        for listing in listings:
+            current = _parse_price_amount(listing.price)
+            if current is None:
+                continue
+            cur_amount, cur_currency = current
+            row = self.conn.execute(
+                "select price, last_drop_alert_price from active_items where item_id = ?",
+                (listing.item_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            previous = _parse_price_amount(row["price"])
+            if previous is None:
+                continue
+            prev_amount, prev_currency = previous
+            if cur_currency != prev_currency or prev_amount <= 0 or cur_amount >= prev_amount:
+                continue
+            pct = (prev_amount - cur_amount) / prev_amount * 100
+            if pct < min_drop_percent:
+                continue
+            floor = _parse_float(row["last_drop_alert_price"])
+            if floor is not None and cur_amount >= floor:
+                continue  # already alerted at this price or lower
+            drops.append((listing, prev_amount, cur_amount, pct))
+        return drops
+
+    def mark_price_drop_alerted(self, item_id: str, price: float) -> None:
+        self.conn.execute(
+            "update active_items set last_drop_alert_price = ? where item_id = ?",
+            (str(price), item_id),
+        )
+        self.conn.commit()
+
     def mark_ended_notified(self, item_id: str) -> None:
         self.conn.execute(
             """
@@ -1085,6 +1233,81 @@ class Store:
             (key, value),
         )
         self.conn.commit()
+
+    def health_snapshot(self) -> dict:
+        """Liveness/telemetry for the /health command and heartbeat, from meta +
+        live counts. Reads only existing tables; no schema change."""
+        seller_count = self.conn.execute("select count(*) from sellers").fetchone()[0]
+        watch_count = self.conn.execute("select count(*) from market_watches").fetchone()[0]
+        error_count = self.conn.execute(
+            "select count(*) from seller_checks "
+            "where last_error is not null and last_error != ''"
+        ).fetchone()[0]
+        return {
+            "last_poll_ok_at": self.get_meta("last_poll_ok_at"),
+            "last_alert_at": self.get_meta("last_alert_at"),
+            "last_heartbeat_at": self.get_meta("last_heartbeat_at"),
+            "last_poll_alert_count": self.get_meta("last_poll_alert_count"),
+            "seller_count": seller_count,
+            "watch_count": watch_count,
+            "error_count": error_count,
+        }
+
+
+def _parse_iso_utc(value: str) -> datetime | None:
+    """Parse an ISO timestamp as a UTC-aware datetime, or None if unparseable.
+
+    A naive value (e.g. from a hand-edited or cross-machine-restored DB) is assumed
+    UTC so it can be subtracted from datetime.now(timezone.utc) without a TypeError.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def format_health_rows(snapshot: dict, *, started_at: datetime, heartbeat_enabled: bool) -> str:
+    now = datetime.now(timezone.utc)
+    uptime = _format_duration((now - started_at).total_seconds())
+    last_ok_raw = snapshot.get("last_poll_ok_at")
+    if last_ok_raw:
+        parsed = _parse_iso_utc(last_ok_raw)
+        if parsed is None:
+            last_poll, healthy = "unknown", False
+        else:
+            ago = (now - parsed).total_seconds()
+            last_poll = f"{_format_duration(ago)} ago"
+            healthy = ago < 2 * 86400
+    else:
+        last_poll, healthy = "never", False
+    lines = [
+        "🟢 Healthy" if healthy else "⚠️ Stale",
+        f"uptime: {uptime}",
+        f"last poll: {last_poll}",
+        f"{snapshot.get('seller_count', 0)} sellers · {snapshot.get('watch_count', 0)} watches",
+    ]
+    if snapshot.get("error_count", 0):
+        lines.append(f"⚠️ {snapshot['error_count']} sellers erroring")
+    alert_count = snapshot.get("last_poll_alert_count")
+    if alert_count is not None:
+        lines.append(f"last cycle: {alert_count} alerts")
+    lines.append(f"heartbeat: {'on' if heartbeat_enabled else 'off'}")
+    return "\n".join(lines)
 
 
 def format_status_rows(rows: list[sqlite3.Row]) -> str:
@@ -1234,3 +1457,45 @@ def _parse_quantity(value: str | None) -> int | None:
     if not value.isdigit():
         return None
     return int(value)
+
+
+_CURRENCY_SYMBOLS = {"£": "GBP", "$": "USD", "€": "EUR"}
+
+
+def _is_currency_code(token: str) -> bool:
+    return len(token) == 3 and token.isalpha()
+
+
+def _parse_price_amount(value: str | None) -> tuple[float, str] | None:
+    """Parse a price string into (amount, currency_code).
+
+    Handles the shapes the codebase produces: trailing code ('430.00 GBP'),
+    leading code ('GBP 9.00'), and symbol-prefixed ('$10.00', '£5.00'). Symbols
+    normalize to a code so '£5' and 'GBP 5' compare equal. Returns None when no
+    amount can be parsed.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    tokens = text.split()
+    currency, amount_text = "", text
+    if len(tokens) >= 2 and _is_currency_code(tokens[-1]):
+        currency, amount_text = tokens[-1].upper(), " ".join(tokens[:-1])
+    elif len(tokens) >= 2 and _is_currency_code(tokens[0]):
+        currency, amount_text = tokens[0].upper(), " ".join(tokens[1:])
+    else:
+        for symbol, code in _CURRENCY_SYMBOLS.items():
+            if amount_text.startswith(symbol):
+                currency, amount_text = code, amount_text[len(symbol):]
+                break
+    try:
+        return float(amount_text.strip().replace(",", "")), currency
+    except ValueError:
+        return None
+
+
+def _parse_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None

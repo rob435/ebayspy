@@ -5,10 +5,63 @@ from ebayspy.market import (
     estimate_resale_profit,
     find_deals,
     market_price,
+    offer_candidates,
     price_distribution,
     variant_label,
 )
 from ebayspy.models import MarketItem
+
+
+def _offer_item(item_id: str, total: float, *, offers: bool) -> MarketItem:
+    return MarketItem(
+        item_id=item_id,
+        title=f"Item {item_id}",
+        url=f"https://example.test/itm/{item_id}",
+        seller="seller",
+        currency="GBP",
+        item_price=total,
+        total_price=total,
+        buying_options=("FIXED_PRICE", "BEST_OFFER") if offers else ("FIXED_PRICE",),
+    )
+
+
+def test_offer_candidates_flags_best_offer_above_threshold() -> None:
+    # Market 100, list-deal threshold 85 (15% off). A BEST_OFFER item at 95 is not
+    # a list deal, but a 15% offer (est 85) would be -> flagged. A non-offer item is
+    # not flagged, and an item already below threshold is find_deals' job.
+    items = [
+        _offer_item("offer", 95, offers=True),
+        _offer_item("plain", 95, offers=False),
+        _offer_item("already", 80, offers=True),
+    ]
+    flagged = offer_candidates(items, 100.0, 15, 15)
+    assert [(i.item_id, est) for i, est in flagged] == [("offer", 85.0)]
+
+
+def test_offer_candidates_respects_credible_offer_ceiling() -> None:
+    # Estimate 85 (market 100, 15% off); a Best Offer is implausible below ~70% of
+    # list, so list is capped at ~85/0.7 ≈ 121. 110 is credible, 130 and 300 are not.
+    items = [
+        _offer_item("ok", 110, offers=True),
+        _offer_item("steep", 130, offers=True),
+        _offer_item("absurd", 300, offers=True),
+    ]
+    flagged = offer_candidates(items, 100.0, 15, 15)
+    assert [i.item_id for i, _ in flagged] == ["ok"]
+
+
+def test_offer_candidates_uses_sold_comps_to_lower_estimate() -> None:
+    # Sold comps (median 72) are cheaper than the heuristic (85) -> estimate follows
+    # the comps, never inflated by them.
+    flagged = offer_candidates(
+        [_offer_item("offer", 95, offers=True)], 100.0, 15, 15, sold_comps=[70, 72, 75]
+    )
+    assert flagged and flagged[0][1] == 72.0
+
+
+def test_offer_candidates_empty_without_price_or_items() -> None:
+    assert offer_candidates([_offer_item("o", 95, offers=True)], None, 15, 15) == []
+    assert offer_candidates([], 100.0, 15, 15) == []
 
 
 def test_price_distribution() -> None:
