@@ -97,6 +97,7 @@ class Store:
                 exclude_terms text,
                 category_id text,
                 include_auctions integer,
+                include_lots integer,
                 markets text,
                 owner_chat_id text,
                 created_at text not null default current_timestamp,
@@ -202,6 +203,7 @@ class Store:
             "exclude_terms": "text",
             "category_id": "text",
             "include_auctions": "integer",
+            "include_lots": "integer",
             "markets": "text",
             "owner_chat_id": "text",
             "market_variant": "text",
@@ -420,6 +422,7 @@ class Store:
         include_auctions: bool | None = None,
         markets: str | None = None,
         owner_chat_id: str | None = None,
+        include_lots: bool | None = None,
     ) -> int | None:
         query = normalize_market_query(query)
         if not query:
@@ -431,8 +434,8 @@ class Store:
             insert into market_watches(
                 query, condition, discount_percent, min_price, max_price,
                 interval_seconds, exclude_terms, category_id, include_auctions, markets,
-                owner_chat_id
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                owner_chat_id, include_lots
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 query,
@@ -446,6 +449,7 @@ class Store:
                 None if include_auctions is None else int(include_auctions),
                 markets,
                 owner_chat_id,
+                None if include_lots is None else int(include_lots),
             ),
         )
         self.conn.commit()
@@ -574,12 +578,21 @@ class Store:
         self.conn.commit()
         return cur.rowcount > 0
 
+    # Alert stages ordered by finality. The table keeps one row per (watch_id,
+    # item_id), so a later stage overwrites an earlier one; ranking lets us treat
+    # an already-recorded later stage as covering an earlier one. Without this, an
+    # auction that progressed deal→final could re-fire its "deal" alert if it ever
+    # briefly left the snipe window again (clock skew / relisted item id).
+    _STAGE_RANK = {"deal": 0, "lot": 0, "final": 1}
+
     def deal_already_alerted(self, watch_id: int, item_id: str, stage: str = "deal") -> bool:
         row = self.conn.execute(
-            "select 1 from market_deal_alerts where watch_id = ? and item_id = ? and stage = ?",
-            (watch_id, item_id, stage),
+            "select stage from market_deal_alerts where watch_id = ? and item_id = ?",
+            (watch_id, item_id),
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        return self._STAGE_RANK.get(row[0], 0) >= self._STAGE_RANK.get(stage, 0)
 
     def record_deal_alert(
         self,

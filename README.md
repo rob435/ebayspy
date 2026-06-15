@@ -68,9 +68,16 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
     automatically if the call isn't entitled.
   - **Rich, actionable deal alerts.** Each deal shows the item photo, an estimated **flip
     profit & ROI** (market minus buy price minus configurable eBay fees), a **price trend**
-    (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, a best-offer flag, the seller
-    rating/link, and inline buttons to open the listing, **mute that variant**, or flag a
-    **wrong match** (which teaches the watch a new exclude term).
+    (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, the **price spread** (P10–P90)
+    and **recent sold comps** (with Insights), a best-offer flag, the seller rating/link, and
+    inline buttons to open the listing, **mute that variant**, or flag a **wrong match**
+    (which teaches the watch a new exclude term).
+  - **Sharper sourcing.** Surfaces **no-bid / low-competition auctions** at a relaxed
+    threshold (win uncontested); flags **scam/risk** (new seller, price too-good, foreign
+    location) and can suppress the worst; spots **lot/bundle arbitrage** (`/watch … lots:on`)
+    by valuing a job-lot of N at N× the single-unit market; and — with the optional `vision`
+    extra — **verifies the listing photo** matches the product and catches mistitled/
+    misgraded gems (tagged "for parts" but the photo looks new).
   - **Auction sniping** (`/watch … auctions:on`): auctions are priced off their live bid
     against the fixed-price market, with a heads-up when a bid drops below market and a
     second **final-call** alert as the auction enters its closing window — the watch

@@ -475,6 +475,7 @@ class EbayClient:
             current_bid=current_bid,
             bid_count=_to_int(summary.get("bidCount")),
             end_date=summary.get("itemEndDate"),
+            item_location=str((summary.get("itemLocation") or {}).get("country") or ""),
         )
 
     @staticmethod

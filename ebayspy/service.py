@@ -4,10 +4,13 @@ import asyncio
 import logging
 import signal
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from . import demand as demand_metrics
 from . import insights as insights_metrics
+from . import risk as risk_metrics
 from . import semantic
+from . import vision
 from .config import Config
 from .ebay import MARKETPLACE_CURRENCY, EbayClient
 from .fx import FxConverter
@@ -19,6 +22,7 @@ from .market import (
     find_arbitrage,
     find_deals,
     market_price,
+    price_distribution,
     variant_label,
 )
 from .matching import (
@@ -26,6 +30,7 @@ from .matching import (
     canonicalize,
     content_tokens,
     filter_comparable,
+    lot_quantity,
     register_aliases,
     specified_dimensions,
     tokenize,
@@ -47,6 +52,19 @@ from .storage import (
 from .telegram import TelegramBot
 
 log = logging.getLogger(__name__)
+
+
+class _Deal(NamedTuple):
+    """A deal candidate. ``price`` is the market value to compare ``item`` against
+    (per-variant median for normal deals, or N×unit-market for a lot of N)."""
+
+    item: MarketItem
+    price: float
+    variant: str | None
+    stage: str
+    ending_soon: bool = False
+    low_competition: bool = False
+    lot_quantity: int | None = None
 
 
 class EbaySpyService:
@@ -78,6 +96,8 @@ class EbaySpyService:
         register_aliases(config.market_aliases)
         if not config.market_semantic:
             semantic.disable()
+        if not config.market_vision:
+            vision.disable()
 
     async def close(self) -> None:
         await self.telegram.close()
@@ -209,9 +229,13 @@ class EbaySpyService:
                     continue
                 if notify_existing:
                     sent = await self._notify_chats(chats, listing)
-                    if sent:
-                        seller_new_count += 1
-                        total_alert_count += 1
+                    if not sent:
+                        # Every chat send failed (e.g. Telegram outage); leave the
+                        # item unseen so the next poll retries instead of silently
+                        # dropping a genuinely new listing.
+                        continue
+                    seller_new_count += 1
+                    total_alert_count += 1
                 self.store.mark_seen(listing, notified=notify_existing)
 
             if not first_scan:
@@ -251,7 +275,10 @@ class EbaySpyService:
                         if sent:
                             seller_ended_count += 1
                             total_alert_count += 1
-                        self.store.mark_ended_notified(listing.item_id)
+                            # Only suppress future ended alerts once the listing's
+                            # single ended notification has actually been delivered;
+                            # a failed send is retried on the next poll.
+                            self.store.mark_ended_notified(listing.item_id)
 
             self.store.upsert_active_listings(listings)
             self.store.record_check(seller, len(listings), seller_new_count, seller_ended_count)
@@ -416,6 +443,9 @@ class EbaySpyService:
     def _home_marketplace(self) -> str:
         return self.config.ebay_global_id.upper().replace("-", "_")
 
+    def _home_country(self) -> str:
+        return self._home_marketplace().replace("EBAY_", "")
+
     async def _maybe_check_arbitrage(self, row, chats: list[str], now: float) -> None:
         """Run the cross-marketplace check on its own slower cadence (it costs one
         search per marketplace), only for watches that opted in."""
@@ -561,6 +591,24 @@ class EbaySpyService:
     def _semantic_threshold(self) -> float | None:
         return self.config.market_semantic_threshold if self.config.market_semantic else None
 
+    async def _vision_check(self, item: MarketItem, query: str) -> tuple[bool, str]:
+        """Optionally verify the listing photo. Returns (drop, note): drop=True when
+        the image clearly isn't the product; note is a one-line image read (incl. a
+        gem flag when the photo looks better than the listing's stated condition).
+        Runs the CLIP work off the event loop; no-ops when vision is unavailable."""
+        if not self.config.market_vision or not item.image_url or not vision.available():
+            return False, ""
+        match = await asyncio.to_thread(vision.match_score, item.image_url, query)
+        if match is not None and match < self.config.market_vision_match_threshold:
+            return True, ""  # photo doesn't depict the product — likely mistitled/wrong
+        result = await asyncio.to_thread(vision.classify_condition, item.image_url)
+        if result is None:
+            return False, ""
+        label, _score = result
+        if vision.is_condition_upgrade(item.condition, label):
+            return False, f"📸 Photo looks new despite “{item.condition or 'poor'}” — possible gem"
+        return False, f"📸 Image looks {label}"
+
     def _price_trend_text(self, watch_id: int, variant: str | None) -> str:
         pct = self.store.price_trend(watch_id, variant or "")
         if pct is None or abs(pct) < 1:
@@ -581,12 +629,10 @@ class EbaySpyService:
                 chats, f"⚠️ Market watch #{row['id']} “{row['query']}” {problem}"
             )
 
-    async def _fetch_sold_prices(
-        self, row, dimensions, labels: set[str]
-    ) -> tuple[dict[str, float], str | None]:
-        """Real sold-price medians per variant + a sales-velocity tag, from the
-        Marketplace Insights API. Returns ({}, None) on any failure so the caller
-        keeps the live-listing estimate."""
+    async def _fetch_sold_prices(self, row, dimensions, labels: set[str]):
+        """Real sold-price medians, distribution, and recent comps per variant,
+        plus a sales-velocity tag, from the Marketplace Insights API. Returns
+        ({}, None, {}, {}) on any failure so the caller keeps the live estimate."""
         try:
             sold = await self.ebay.search_item_sales(
                 canonicalize(row["query"]),
@@ -596,7 +642,7 @@ class EbaySpyService:
             )
         except Exception:
             log.warning("Insights sold-data lookup failed for %s; using listings", row["query"])
-            return {}, None
+            return {}, None, {}, {}
         comparable = filter_comparable(
             row["query"],
             sold,
@@ -607,13 +653,24 @@ class EbaySpyService:
             semantic_threshold=self._semantic_threshold(),
         )
         clusters = cluster_by_variant(comparable, dimensions)
-        price_map = {
-            label: market_price(item.total_price for item in group)
-            for label, group in clusters.items()
-            if label in labels and len(group) >= self.config.market_min_sample
-        }
+        price_map: dict[str, float] = {}
+        dist_map: dict[str, tuple[float, float, float]] = {}
+        comps_map: dict[str, list[float]] = {}
+        for label, group in clusters.items():
+            if label not in labels or len(group) < self.config.market_min_sample:
+                continue
+            price = market_price(item.total_price for item in group)
+            if price is None:
+                continue
+            price_map[label] = price
+            dist = price_distribution(item.total_price for item in group)
+            if dist:
+                dist_map[label] = dist
+            # Most-recent sold prices as comps (newest first by sold date).
+            recent = sorted(group, key=lambda s: s.sold_date or "", reverse=True)
+            comps_map[label] = [s.total_price for s in recent[:3]]
         tag, _ = insights_metrics.summarize_sold(comparable)
-        return {k: v for k, v in price_map.items() if v is not None}, tag
+        return price_map, tag, dist_map, comps_map
 
     def _demand_summary(self, watch_id: int) -> tuple[str, str]:
         stats = self.store.market_demand_stats(watch_id, self.config.market_demand_window_days)
@@ -636,23 +693,31 @@ class EbaySpyService:
 
     def _auction_candidates(
         self, row, auctions: list[MarketItem], dimensions, priced, muted, discount
-    ) -> list[tuple[MarketItem, float, str | None, str, bool]]:
+    ) -> list[_Deal]:
         """Auction snipes below their own variant's fixed-price market.
 
         Sends a heads-up the first time a bid is below market, and a separate
         final-call when it enters the snipe window; flags the watch for turbo
-        polling so the final-call lands in time.
+        polling so the final-call lands in time. Auctions with no/low competition
+        qualify at a gentler discount, since winning uncontested is itself worth a lot.
         """
         watch_id = row["id"]
         ratio = self.config.market_min_deal_ratio
         snipe = self.config.market_snipe_window_seconds
-        out: list[tuple[MarketItem, float, str | None, str, bool]] = []
+        out: list[_Deal] = []
         for auction in auctions:
             label = variant_label(auction, dimensions) if dimensions else ""
             price = priced.get(label)
             if price is None or label in muted:
                 continue
-            if not (price * ratio <= auction.total_price <= price * (1 - discount / 100)):
+            low_comp = (
+                auction.bid_count is not None
+                and auction.bid_count <= self.config.market_low_bid_count
+            )
+            effective_discount = (
+                min(discount, self.config.market_nobid_discount_percent) if low_comp else discount
+            )
+            if not (price * ratio <= auction.total_price <= price * (1 - effective_discount / 100)):
                 continue
             secs = self._seconds_until(auction.end_date)
             if secs is not None and secs <= 0:
@@ -661,9 +726,55 @@ class EbaySpyService:
             stage = "final" if ending_soon else "deal"
             if self.store.deal_already_alerted(watch_id, auction.item_id, stage):
                 continue
-            out.append((auction, price, label or None, stage, ending_soon))
+            out.append(
+                _Deal(auction, price, label or None, stage, ending_soon, low_comp)
+            )
             if secs is not None and secs <= snipe * 2:
                 self._auction_turbo[watch_id] = self.config.market_turbo_interval_seconds
+        return out
+
+    def _watch_lots_enabled(self, row) -> bool:
+        return bool(row["include_lots"])
+
+    def _lot_candidates(self, row, items, dimensions, priced, muted, discount) -> list[_Deal]:
+        """Job-lot/bundle deals: value a lot of N by N × the single-unit market.
+
+        Lots are normally excluded from matching; here we deliberately keep them,
+        parse the quantity, and flag lots priced below their per-unit worth.
+        """
+        if not self._watch_lots_enabled(row):
+            return []
+        watch_id = row["id"]
+        ratio = self.config.market_min_deal_ratio
+        blocked = self.store.blocked_item_ids(watch_id)
+        lot_comparable = [
+            item
+            for item in filter_comparable(
+                row["query"],
+                items,
+                extra_excludes=self._watch_exclude_terms(row),
+                coverage=self.config.market_match_coverage,
+                fuzzy_threshold=self.config.market_fuzzy_threshold,
+                semantic_threshold=self._semantic_threshold(),
+                allow_lots=True,
+            )
+            if item.item_id not in blocked and not item.is_auction
+        ]
+        out: list[_Deal] = []
+        for lot in lot_comparable:
+            quantity = lot_quantity(lot.title)
+            if not quantity:
+                continue
+            label = variant_label(lot, dimensions) if dimensions else ""
+            unit_market = priced.get(label)
+            if unit_market is None or label in muted:
+                continue
+            lot_value = unit_market * quantity
+            if not (lot_value * ratio <= lot.total_price <= lot_value * (1 - discount / 100)):
+                continue
+            if self.store.deal_already_alerted(watch_id, lot.item_id, "lot"):
+                continue
+            out.append(_Deal(lot, lot_value, label or None, "lot", lot_quantity=quantity))
         return out
 
     def _store_headline_price(self, watch_id, items, comparable, clusters) -> float | None:
@@ -705,15 +816,25 @@ class EbaySpyService:
             for label, group in clusters.items()
             if len(group) >= self.config.market_min_sample
         }
+        # Price distribution (P10/P50/P90) per variant — from live asking prices
+        # by default, overridden by real sold prices under the insights source.
+        dist_by_label = {
+            label: price_distribution(item.total_price for item in clusters.get(label, []))
+            for label in priced
+        }
+        comps_by_label: dict[str, list[float]] = {}
+
         # When real sold data is available, price each (live-buyable) variant
         # against its *sold* median instead of the live-asking median.
         sold_demand_tag = None
         if self.config.market_price_source == "insights" and priced:
-            sold_map, sold_demand_tag = await self._fetch_sold_prices(
+            sold_map, sold_demand_tag, sold_dist, sold_comps = await self._fetch_sold_prices(
                 row, dimensions, set(priced)
             )
             for label, sold in sold_map.items():
                 priced[label] = sold
+            dist_by_label.update(sold_dist)
+            comps_by_label = sold_comps
             if sold_map:
                 # Keep the /watches headline consistent with the sold pricing.
                 dominant = max(priced, key=lambda label: len(clusters.get(label, [])))
@@ -765,8 +886,7 @@ class EbaySpyService:
 
         muted = self.store.muted_variants(watch_id)
         ratio = self.config.market_min_deal_ratio
-        # (item, variant_price, variant_label, stage, ending_soon)
-        candidates: list[tuple[MarketItem, float, str | None, str, bool]] = []
+        candidates: list[_Deal] = []
 
         # Fixed-price deals across every priceable variant.
         for label, group in clusters.items():
@@ -775,26 +895,49 @@ class EbaySpyService:
                 continue
             for item in find_deals(group, price, discount, ratio):
                 if not self.store.deal_already_alerted(watch_id, item.item_id, "deal"):
-                    candidates.append((item, price, label or None, "deal", False))
+                    candidates.append(_Deal(item, price, label or None, "deal"))
 
         # Auction snipes, priced against their own variant's fixed-price market.
         self._auction_turbo.pop(watch_id, None)
         candidates.extend(self._auction_candidates(row, auctions, dimensions, priced, muted, discount))
+        # Lot/bundle arbitrage (opt-in per watch).
+        candidates.extend(self._lot_candidates(row, items, dimensions, priced, muted, discount))
 
-        candidates.sort(key=lambda c: c[0].total_price / c[1])
+        candidates.sort(key=lambda c: c.item.total_price / c.price)
         first_check = not self.store.market_watch_has_successful_check(watch_id)
         sent_count = 0
         # Drain at most a handful of deals per tick so a backlog (common on the
         # very first check) never floods the chat in one burst.
-        for item, price, variant, stage, ending_soon in candidates[
-            : self.config.market_max_deals_per_cycle
-        ]:
+        home_country = self._home_country()
+        for deal in candidates[: self.config.market_max_deals_per_cycle]:
+            item, price, variant = deal.item, deal.price, deal.variant
+            stage, ending_soon, low_comp = deal.stage, deal.ending_soon, deal.low_competition
+            lot_qty = deal.lot_quantity
+            risk_score, risk_reasons = risk_metrics.assess(item, price, home_country)
+            if risk_score > self.config.market_risk_max:
+                log.info(
+                    "Suppressing high-risk deal %s on watch %s (risk %s: %s)",
+                    item.item_id, watch_id, risk_score, "; ".join(risk_reasons),
+                )
+                continue
+            risk_text = (
+                f"⚠️ Risk {risk_score}/100 — {'; '.join(risk_reasons)}"
+                if risk_score >= self.config.market_risk_warn and risk_reasons
+                else ""
+            )
+            drop, vision_note = await self._vision_check(item, query)
+            if drop:
+                log.info(
+                    "Vision dropped deal %s on watch %s: image doesn't match the product",
+                    item.item_id, watch_id,
+                )
+                continue
             actual_discount = discount_percent_for(item.total_price, price)
             profit, roi = estimate_resale_profit(
                 price,
                 item.total_price,
                 self.config.market_resale_fee_percent,
-                self.config.market_resale_fee_fixed,
+                self.config.market_resale_fee_fixed * (lot_qty or 1),
             )
             sent = await self._notify_deal_chats(
                 chats,
@@ -809,12 +952,21 @@ class EbaySpyService:
                 ending_soon=ending_soon,
                 trend=self._price_trend_text(watch_id, variant),
                 demand=demand_tag,
-            )
-            self.store.record_deal_alert(
-                watch_id, item.item_id, item.total_price, variant=variant,
-                title=item.title, stage=stage,
+                distribution=dist_by_label.get(variant or ""),
+                comps=comps_by_label.get(variant or ""),
+                low_competition=low_comp,
+                risk=risk_text,
+                lot_quantity=lot_qty,
+                vision=vision_note,
             )
             if sent:
+                # Only mark the deal as alerted once it has actually been
+                # delivered to at least one chat; otherwise a transient Telegram
+                # failure would permanently suppress a real below-market deal.
+                self.store.record_deal_alert(
+                    watch_id, item.item_id, item.total_price, variant=variant,
+                    title=item.title, stage=stage,
+                )
                 sent_count += 1
         await self._finish_market_check(row, chats, deal_count=sent_count)
         log.info(
@@ -846,6 +998,12 @@ class EbaySpyService:
         ending_soon: bool = False,
         trend: str = "",
         demand: str = "",
+        distribution: tuple[float, float, float] | None = None,
+        comps: list[float] | None = None,
+        low_competition: bool = False,
+        risk: str = "",
+        lot_quantity: int | None = None,
+        vision: str = "",
     ) -> bool:
         sent_any = False
         for chat_id in chats:
@@ -863,6 +1021,12 @@ class EbaySpyService:
                     ending_soon=ending_soon,
                     trend=trend,
                     demand=demand,
+                    distribution=distribution,
+                    comps=comps,
+                    low_competition=low_competition,
+                    risk=risk,
+                    lot_quantity=lot_quantity,
+                    vision=vision,
                 )
                 sent_any = True
             except Exception:
@@ -1182,6 +1346,7 @@ class EbaySpyService:
         interval: int | None = None
         category_id: str | None = None
         include_auctions: bool | None = None
+        include_lots: bool | None = None
         markets: str | None = None
         excludes: list[str] = []
         query_words: list[str] = []
@@ -1202,6 +1367,9 @@ class EbaySpyService:
                     continue
                 if key in {"auctions", "auction"}:
                     include_auctions = value.lower() in {"on", "yes", "true", "1"}
+                    continue
+                if key in {"lots", "lot", "bundles"}:
+                    include_lots = value.lower() in {"on", "yes", "true", "1"}
                     continue
                 if key in {"markets", "market"}:
                     codes = [c.strip().upper() for c in value.split(",") if c.strip()]
@@ -1248,6 +1416,7 @@ class EbaySpyService:
             include_auctions=include_auctions,
             markets=markets,
             owner_chat_id=chat_id,
+            include_lots=include_lots,
         )
         if watch_id is None:
             return f"Already watching the market for: {query}"

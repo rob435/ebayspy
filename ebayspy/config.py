@@ -101,6 +101,8 @@ class Config:
     market_hydrate: bool
     market_hydrate_limit: int
     market_price_source: str
+    market_vision: bool
+    market_vision_match_threshold: float
     market_min_dispersion: float
     market_deal_scan: bool
     market_resale_fee_percent: float
@@ -108,12 +110,16 @@ class Config:
     market_auctions_default: bool
     market_snipe_window_seconds: int
     market_turbo_interval_seconds: int
+    market_low_bid_count: int
+    market_nobid_discount_percent: int
     market_demand_grace_seconds: int
     market_demand_window_days: int
     market_demand_min_events: int
     market_arbitrage_threshold: float
     market_arbitrage_interval_seconds: int
     market_health_threshold: int
+    market_risk_warn: int
+    market_risk_max: int
     fx_rates: tuple[tuple[str, float], ...]
     market_aliases: tuple[tuple[str, str], ...]
     market_watches: tuple[str, ...]
@@ -161,6 +167,8 @@ class Config:
             market_price_source=(
                 os.getenv("MARKET_PRICE_SOURCE", "listings").strip().lower() or "listings"
             ),
+            market_vision=_bool_env("MARKET_VISION", False),
+            market_vision_match_threshold=_float_env("MARKET_VISION_MATCH_THRESHOLD", 0.18),
             market_min_dispersion=_float_env("MARKET_MIN_DISPERSION", 0.12),
             market_deal_scan=_bool_env("MARKET_DEAL_SCAN", False),
             market_resale_fee_percent=_float_env("MARKET_RESALE_FEE_PERCENT", 12.8),
@@ -168,12 +176,16 @@ class Config:
             market_auctions_default=_bool_env("MARKET_AUCTIONS_DEFAULT", False),
             market_snipe_window_seconds=_int_env("MARKET_SNIPE_WINDOW_SECONDS", 600),
             market_turbo_interval_seconds=_int_env("MARKET_TURBO_INTERVAL_SECONDS", 45),
+            market_low_bid_count=_int_env("MARKET_LOW_BID_COUNT", 1),
+            market_nobid_discount_percent=_int_env("MARKET_NOBID_DISCOUNT_PERCENT", 5),
             market_demand_grace_seconds=_int_env("MARKET_DEMAND_GRACE_SECONDS", 86400),
             market_demand_window_days=_int_env("MARKET_DEMAND_WINDOW_DAYS", 14),
             market_demand_min_events=_int_env("MARKET_DEMAND_MIN_EVENTS", 3),
             market_arbitrage_threshold=_float_env("MARKET_ARBITRAGE_THRESHOLD", 20.0),
             market_arbitrage_interval_seconds=_int_env("MARKET_ARBITRAGE_INTERVAL_SECONDS", 3600),
             market_health_threshold=_int_env("MARKET_HEALTH_THRESHOLD", 5),
+            market_risk_warn=_int_env("MARKET_RISK_WARN", 40),
+            market_risk_max=_int_env("MARKET_RISK_MAX", 100),
             fx_rates=tuple(_fx_rates_env("FX_RATES")),
             market_aliases=tuple(_aliases_env("ALIASES")),
             market_watches=tuple(_market_watches_env("MARKET_WATCHES")),

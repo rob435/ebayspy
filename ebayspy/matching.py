@@ -68,6 +68,32 @@ LOT_TOKENS = {
 }
 EXCLUSION_TOKENS = ACCESSORY_TOKENS | DAMAGE_TOKENS | LOT_TOKENS
 
+# Lot/bundle quantity patterns, matched on the raw lowercased title so "x5",
+# "5x", "lot of 5", "bundle of 5", "5-pack" etc. are recognised. Only fires with
+# an explicit lot/multi signal, so single items ("iPhone 13") never match.
+_LOT_QTY_RES = [
+    re.compile(r"(?:job\s*lot|joblot|lot|bundle|pack|set)\s*of\s*(\d{1,3})"),
+    re.compile(r"(\d{1,3})\s*(?:x\b|pcs|pc\b|pieces|units|[- ]?pack)"),
+    re.compile(r"\bx\s*(\d{1,3})\b"),
+]
+
+def lot_quantity(title: str) -> int | None:
+    """Number of units in a lot/bundle title, or None if it isn't a countable lot."""
+    low = (title or "").lower()
+    if " pair" in f" {low}":
+        return 2
+    quantities = []
+    for pattern in _LOT_QTY_RES:
+        for match in pattern.finditer(low):
+            try:
+                n = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if 2 <= n <= 200:
+                quantities.append(n)
+    return max(quantities) if quantities else None
+
+
 # Multi-word signals matched as whole phrases in the normalised title.
 EXCLUSION_PHRASES = {
     "for parts", "for spares", "spares or repair", "spares or repairs",
@@ -99,6 +125,17 @@ COLOURS = {
     "charcoal", "midnight", "starlight", "titanium", "champagne", "ivory",
     "cream", "burgundy", "lavender", "turquoise", "gunmetal",
 }
+# Spelling variants that name the same colour. Folded to one canonical value so a
+# UK "grey" query still matches a US "gray" listing (and vice versa) instead of
+# silently dropping the comparable from the price sample.
+_COLOUR_ALIASES = {"gray": "grey"}
+
+
+def canonical_colours(tokens: set[str]) -> set[str]:
+    """Colour tokens from ``tokens``, folding spelling synonyms (e.g. gray→grey)."""
+    return {_COLOUR_ALIASES.get(token, token) for token in tokens if token in COLOURS}
+
+
 _CAPACITY_RE = re.compile(r"(\d+)\s*(gb|tb)\b")
 
 # Numbers that are measurements/specs, not model identifiers.
@@ -219,7 +256,7 @@ def attributes(text: str) -> dict[str, object]:
     """
     capacities = {f"{int(m.group(1))}{m.group(2)}" for m in _CAPACITY_RE.finditer(text.lower())}
     token_set = set(tokenize(text))
-    colours = token_set & COLOURS
+    colours = canonical_colours(token_set)
     qualifiers = token_set & QUALIFIERS
     return {
         "capacity": next(iter(capacities)) if len(capacities) == 1 else None,
@@ -254,6 +291,7 @@ def is_comparable(
     coverage: float = DEFAULT_COVERAGE,
     fuzzy_threshold: float | None = None,
     semantic_ok: bool = False,
+    allow_lots: bool = False,
 ) -> bool:
     """Whether ``title`` is the same product as ``query``.
 
@@ -271,12 +309,15 @@ def is_comparable(
 
     # 1) Phrase exclusions the query did not ask for.
     padded_title = f" {t_norm} "
-    for phrase in EXCLUSION_PHRASES:
+    phrases = EXCLUSION_PHRASES - {"job lot"} if allow_lots else EXCLUSION_PHRASES
+    for phrase in phrases:
         if phrase not in q_norm and f" {phrase} " in padded_title:
             return False
 
-    # 2) Single-word exclusions introduced by the title.
-    token_excludes = set(EXCLUSION_TOKENS)
+    # 2) Single-word exclusions introduced by the title (lot terms kept when the
+    #    caller is hunting lot/bundle arbitrage).
+    base_excludes = (ACCESSORY_TOKENS | DAMAGE_TOKENS) if allow_lots else EXCLUSION_TOKENS
+    token_excludes = set(base_excludes)
     for term in extra_excludes:
         token_excludes.update(tokenize(term))
     for token in t_tokens - q_tokens:
@@ -323,6 +364,7 @@ def filter_comparable(
     coverage: float = DEFAULT_COVERAGE,
     fuzzy_threshold: float | None = None,
     semantic_threshold: float | None = None,
+    allow_lots: bool = False,
 ) -> list[T]:
     """Keep only the items whose title is comparable to ``query``.
 
@@ -345,5 +387,6 @@ def filter_comparable(
             coverage=coverage,
             fuzzy_threshold=fuzzy_threshold,
             semantic_ok=sok,
+            allow_lots=allow_lots,
         )
     ]

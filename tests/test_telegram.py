@@ -107,3 +107,29 @@ def test_deal_notification_includes_rating() -> None:
         assert "Accepts offers" in text
     finally:
         asyncio.run(bot.close())
+
+
+def test_deal_notification_shows_distribution_and_comps() -> None:
+    bot = _bot("EBAY-GB")
+    captured: list[str] = []
+
+    async def fake_send(chat_id, text, disable_preview=False, reply_markup=None):
+        captured.append(text)
+
+    bot.send_message = fake_send
+    item = MarketItem(
+        item_id="1", title="Dyson Airblade HU02", url="https://www.ebay.co.uk/itm/1",
+        seller="s", currency="GBP", item_price=300.0, total_price=300.0,
+    )
+    try:
+        asyncio.run(
+            bot.notify_deal(
+                "c", item, market_price=430.0, discount_percent=30, query="dyson airblade hu02",
+                distribution=(380.0, 430.0, 510.0), comps=[440.0, 425.0, 450.0],
+            )
+        )
+        text = captured[0]
+        assert "range £380.00–£510.00" in text
+        assert "🧾 Recently sold: £440.00 · £425.00 · £450.00" in text
+    finally:
+        asyncio.run(bot.close())
