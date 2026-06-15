@@ -115,6 +115,78 @@ def test_seller_listings_searches_then_hydrates() -> None:
         asyncio.run(client.close())
 
 
+def test_market_item_includes_shipping_in_total() -> None:
+    client = _client()
+    summary = {
+        "legacyItemId": "123456789012",
+        "title": "Dyson Airblade",
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+        "price": {"value": "100.00", "currency": "GBP"},
+        "seller": {"username": "seller_one"},
+        "condition": "New",
+        "buyingOptions": ["FIXED_PRICE"],
+        "shippingOptions": [
+            {"shippingCost": {"value": "9.99", "currency": "GBP"}},
+            {"shippingCost": {"value": "4.99", "currency": "GBP"}},
+        ],
+    }
+    try:
+        item = client._market_item_from_summary(summary, "GBP")
+
+        assert item is not None
+        assert item.item_price == 100.00
+        assert item.shipping_cost == 4.99  # lowest shipping option
+        assert item.total_price == 104.99
+        assert item.condition == "New"
+    finally:
+        asyncio.run(client.close())
+
+
+def test_market_item_unknown_shipping_is_zero() -> None:
+    client = _client()
+    summary = {
+        "legacyItemId": "123456789012",
+        "title": "No shipping data",
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+        "price": {"value": "50.00", "currency": "GBP"},
+    }
+    try:
+        item = client._market_item_from_summary(summary, "GBP")
+
+        assert item is not None
+        assert item.shipping_cost is None
+        assert item.total_price == 50.00
+    finally:
+        asyncio.run(client.close())
+
+
+def test_market_item_skipped_without_price() -> None:
+    client = _client()
+    summary = {
+        "legacyItemId": "123456789012",
+        "title": "Broken",
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+    }
+    try:
+        assert client._market_item_from_summary(summary, "GBP") is None
+    finally:
+        asyncio.run(client.close())
+
+
+def test_marketplace_currency_maps_gb_to_gbp() -> None:
+    client = EbayClient(
+        app_id="appid",
+        client_secret="secret",
+        global_id="EBAY-GB",
+        timeout_seconds=1,
+        max_items=20,
+    )
+    try:
+        assert client._marketplace_currency() == "GBP"
+    finally:
+        asyncio.run(client.close())
+
+
 def test_item_active_returns_true_for_open_listing() -> None:
     client = _client()
 

@@ -10,13 +10,56 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .models import Listing
+from .models import Listing, MarketItem, SoldItem
 
 log = logging.getLogger(__name__)
 
 OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 BROWSE_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
 BROWSE_ITEM_BY_LEGACY_ID_URL = "https://api.ebay.com/buy/browse/v1/item/get_item_by_legacy_id"
+INSIGHTS_SALES_URL = (
+    "https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search"
+)
+
+BASE_SCOPE = "https://api.ebay.com/oauth/api_scope"
+INSIGHTS_SCOPE = (
+    "https://api.ebay.com/oauth/api_scope "
+    "https://api.ebay.com/oauth/api_scope/buy.marketplace.insights"
+)
+
+MARKETPLACE_CURRENCY = {
+    "EBAY_US": "USD",
+    "EBAY_GB": "GBP",
+    "EBAY_DE": "EUR",
+    "EBAY_FR": "EUR",
+    "EBAY_IT": "EUR",
+    "EBAY_ES": "EUR",
+    "EBAY_IE": "EUR",
+    "EBAY_NL": "EUR",
+    "EBAY_AT": "EUR",
+    "EBAY_BE": "EUR",
+    "EBAY_AU": "AUD",
+    "EBAY_CA": "CAD",
+    "EBAY_CH": "CHF",
+    "EBAY_PL": "PLN",
+}
+
+# eBay condition IDs for the optional per-watch condition filter.
+CONDITION_IDS = {"new": "1000", "used": "3000"}
+
+
+def _to_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: object) -> int | None:
+    try:
+        return int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 class EbayClient:
@@ -34,8 +77,7 @@ class EbayClient:
         self.global_id = global_id
         self.max_items = max_items
         self.detail_concurrency = max(1, detail_concurrency)
-        self._oauth_token: str | None = None
-        self._oauth_token_expires_at = 0.0
+        self._oauth_tokens: dict[str, tuple[str, float]] = {}
         self.client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={
@@ -57,6 +99,98 @@ class EbayClient:
     async def hydrate_listings(self, listings: list[Listing]) -> list[Listing]:
         """Fetch per-item detail for a specific subset of listings (e.g. only new ones)."""
         return await self._hydrate_listings(listings)
+
+    async def hydrate_market_items(
+        self, items: list[MarketItem], limit: int
+    ) -> list[MarketItem]:
+        """Enrich up to ``limit`` items with structured catalog data (ePID, GTIN,
+        MPN, and localizedAspects) via getItem — concurrent and bounded so the
+        extra calls stay affordable. Items beyond the cap are returned unchanged.
+        """
+        if limit <= 0 or not items:
+            return items
+        semaphore = asyncio.Semaphore(self.detail_concurrency)
+
+        async def enrich(item: MarketItem) -> MarketItem:
+            async with semaphore:
+                try:
+                    detail = await self._get_item_by_legacy_id(item.item_id)
+                except Exception:
+                    log.debug("Could not hydrate market item %s", item.item_id, exc_info=True)
+                    return item
+            aspects = {
+                str(aspect.get("name")): str(aspect.get("value"))
+                for aspect in detail.get("localizedAspects") or []
+                if aspect.get("name") and aspect.get("value") is not None
+            }
+            return replace(
+                item,
+                epid=str(detail.get("epid") or ""),
+                gtin=str(detail.get("gtin") or ""),
+                mpn=str(detail.get("mpn") or ""),
+                aspects=aspects,
+            )
+
+        head = await asyncio.gather(*(enrich(item) for item in items[:limit]))
+        return [*head, *items[limit:]]
+
+    async def search_market(
+        self,
+        query: str,
+        *,
+        condition: str | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        limit: int = 200,
+        sort: str | None = None,
+        include_auctions: bool = False,
+        category_ids: str | None = None,
+        marketplace: str | None = None,
+    ) -> list[MarketItem]:
+        """Sample live listings matching a keyword query.
+
+        Defaults to eBay Best Match (``sort=None``), which ranks the actual
+        product highly and returns a representative spread of comparable prices
+        — the right sample for a median. (A cheapest-first ``sort='price'`` pass
+        is biased low and, when accessories are cheaper than the item, can miss
+        the product entirely; callers opt into it only as a supplementary
+        deal-scan.) ``include_auctions`` adds auction listings (priced off their
+        current bid); ``category_ids`` and ``marketplace`` narrow/redirect the
+        search.
+        """
+        headers = await self._authorized_headers(marketplace)
+        currency = self._marketplace_currency(marketplace)
+        options = "FIXED_PRICE|AUCTION" if include_auctions else "FIXED_PRICE"
+        filters = [f"buyingOptions:{{{options}}}"]
+        condition_ids = CONDITION_IDS.get((condition or "").strip().lower())
+        if condition_ids:
+            filters.append(f"conditionIds:{{{condition_ids}}}")
+        if min_price is not None or max_price is not None:
+            low = min_price if min_price is not None else 0.0
+            high = max_price if max_price is not None else 999999.0
+            filters.append(f"price:[{low:.2f}..{high:.2f}]")
+            filters.append(f"priceCurrency:{currency}")
+        params = {
+            "q": query,
+            "filter": ",".join(filters),
+            "limit": min(max(limit, 1), 200),
+        }
+        if category_ids:
+            params["category_ids"] = category_ids
+        if sort:
+            params["sort"] = sort
+        response = await self.client.get(BROWSE_SEARCH_URL, headers=headers, params=params)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"eBay Browse API market search failed ({response.status_code}): "
+                f"{self._error_text(response)}"
+            )
+        payload = response.json()
+        items = [
+            self._market_item_from_summary(summary, currency)
+            for summary in payload.get("itemSummaries") or []
+        ]
+        return [item for item in items if item is not None]
 
     async def seller_exists(self, seller: str) -> bool | None:
         try:
@@ -80,29 +214,37 @@ class EbayClient:
         return str(username) if username else None
 
     async def item_active(self, item_id: str) -> bool | None:
+        active, _ = await self.item_ended_state(item_id)
+        return active
+
+    async def item_ended_state(self, item_id: str) -> tuple[bool | None, str | None]:
         # The Browse API seller-filtered search can transiently omit items
         # that are still listed; verify before declaring an item ended.
-        # True = still active per getItem, False = ended, None = unknown.
+        # Returns (active, end_date): active True = still listed, False = ended,
+        # None = unknown; end_date is the eBay itemEndDate when the item has ended.
         try:
             item = await self._get_item_by_legacy_id(item_id)
         except Exception as exc:
             message = str(exc).lower()
             if "404" in message or "not found" in message:
-                return False
+                return False, None
             log.debug("Could not verify active state for %s", item_id, exc_info=True)
-            return None
+            return None, None
         end_date = item.get("itemEndDate")
         if not end_date:
-            return True
+            return True, None
         try:
             parsed = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
         except ValueError:
-            return True
-        return parsed > datetime.now(timezone.utc)
+            return True, None
+        if parsed > datetime.now(timezone.utc):
+            return True, None
+        return False, str(end_date)
 
-    async def _oauth_access_token(self) -> str:
-        if self._oauth_token and time.time() < self._oauth_token_expires_at:
-            return self._oauth_token
+    async def _oauth_access_token(self, scope: str = BASE_SCOPE) -> str:
+        cached = self._oauth_tokens.get(scope)
+        if cached and time.time() < cached[1]:
+            return cached[0]
         if not self.app_id or not self.client_secret:
             raise RuntimeError("EBAY_APP_ID and EBAY_CLIENT_SECRET are required for the eBay API")
 
@@ -113,10 +255,7 @@ class EbayClient:
                 "Authorization": f"Basic {credentials}",
                 "Content-Type": "application/x-www-form-urlencoded",
             },
-            data={
-                "grant_type": "client_credentials",
-                "scope": "https://api.ebay.com/oauth/api_scope",
-            },
+            data={"grant_type": "client_credentials", "scope": scope},
         )
         if response.status_code != 200:
             raise RuntimeError(
@@ -125,15 +264,16 @@ class EbayClient:
         payload = response.json()
         token = str(payload["access_token"])
         expires_in = int(payload.get("expires_in", 7200))
-        self._oauth_token = token
-        self._oauth_token_expires_at = time.time() + max(60, expires_in - 60)
+        self._oauth_tokens[scope] = (token, time.time() + max(60, expires_in - 60))
         return token
 
-    async def _authorized_headers(self) -> dict[str, str]:
-        token = await self._oauth_access_token()
+    async def _authorized_headers(
+        self, marketplace: str | None = None, scope: str = BASE_SCOPE
+    ) -> dict[str, str]:
+        token = await self._oauth_access_token(scope)
         return {
             "Authorization": f"Bearer {token}",
-            "X-EBAY-C-MARKETPLACE-ID": self._marketplace_id(),
+            "X-EBAY-C-MARKETPLACE-ID": (marketplace or self._marketplace_id()),
         }
 
     async def _search_seller_listings(self, seller: str) -> list[Listing]:
@@ -232,7 +372,126 @@ class EbayClient:
             listing_type=", ".join(item.get("buyingOptions") or []),
             category=str(categories[0].get("categoryName") or "") if categories else "",
             quantity_available=self._availability_quantity(item),
+            seller_feedback_percent=str(seller_info.get("feedbackPercentage") or ""),
+            seller_feedback_score=str(seller_info.get("feedbackScore") or ""),
         )
+
+    async def search_item_sales(
+        self,
+        query: str,
+        *,
+        condition: str | None = None,
+        category_ids: str | None = None,
+        marketplace: str | None = None,
+        limit: int = 200,
+    ) -> list[SoldItem]:
+        """Real completed-sale history from the Marketplace Insights API.
+
+        Requires the (Limited Release) marketplace-insights OAuth scope; if the
+        app is not entitled the OAuth/search call raises and the caller falls
+        back to the live-listing estimate.
+        """
+        headers = await self._authorized_headers(marketplace, scope=INSIGHTS_SCOPE)
+        currency = self._marketplace_currency(marketplace)
+        filters = []
+        condition_ids = CONDITION_IDS.get((condition or "").strip().lower())
+        if condition_ids:
+            filters.append(f"conditionIds:{{{condition_ids}}}")
+        params = {"q": query, "limit": min(max(limit, 1), 200)}
+        if filters:
+            params["filter"] = ",".join(filters)
+        if category_ids:
+            params["category_ids"] = category_ids
+        response = await self.client.get(INSIGHTS_SALES_URL, headers=headers, params=params)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"eBay Marketplace Insights search failed ({response.status_code}): "
+                f"{self._error_text(response)}"
+            )
+        payload = response.json()
+        sales = [
+            self._sold_item_from_summary(summary, currency)
+            for summary in payload.get("itemSales") or []
+        ]
+        return [sale for sale in sales if sale is not None]
+
+    @staticmethod
+    def _sold_item_from_summary(summary: dict, currency: str) -> SoldItem | None:
+        price = summary.get("lastSoldPrice") or {}
+        value = _to_float(price.get("value"))
+        if value is None:
+            return None
+        return SoldItem(
+            item_id=str(summary.get("itemId") or summary.get("legacyItemId") or ""),
+            title=str(summary.get("title") or "Untitled"),
+            total_price=value,
+            currency=str(price.get("currency") or currency),
+            sold_date=summary.get("lastSoldDate"),
+            quantity=_to_int(summary.get("totalSoldQuantity")) or 1,
+        )
+
+    def _market_item_from_summary(self, summary: dict, currency: str) -> MarketItem | None:
+        item_id = (
+            str(summary.get("legacyItemId") or "")
+            or self._legacy_id_from_browse_id(str(summary.get("itemId") or ""))
+            or self._extract_item_id(str(summary.get("itemWebUrl") or ""))
+        )
+        url = str(summary.get("itemWebUrl") or "")
+        if not item_id or not url:
+            return None
+        price = summary.get("price") or {}
+        bid = summary.get("currentBidPrice") or {}
+        item_price = _to_float(price.get("value"))
+        current_bid = _to_float(bid.get("value"))
+        buying_options = tuple(summary.get("buyingOptions") or ())
+        is_auction = "AUCTION" in buying_options
+        # Auctions are priced off the live bid; fixed listings off the asking price.
+        effective = current_bid if (is_auction and current_bid is not None) else item_price
+        if effective is None:
+            return None
+        shipping_cost = self._lowest_shipping(summary)
+        seller_info = summary.get("seller") or {}
+        categories = summary.get("categories") or []
+        category = categories[0] if categories else {}
+        return MarketItem(
+            item_id=item_id,
+            title=str(summary.get("title") or "Untitled"),
+            url=url,
+            seller=str(seller_info.get("username") or ""),
+            currency=str(price.get("currency") or bid.get("currency") or currency),
+            item_price=item_price if item_price is not None else effective,
+            # Unknown shipping is treated as 0 (best case); most BIN listings
+            # expose a shipping cost or ship free.
+            total_price=effective + (shipping_cost or 0.0),
+            shipping_cost=shipping_cost,
+            condition=str(summary.get("condition") or ""),
+            buying_options=buying_options,
+            image_url=(summary.get("image") or {}).get("imageUrl"),
+            listed_at=summary.get("itemCreationDate"),
+            seller_feedback_percent=_to_float(seller_info.get("feedbackPercentage")),
+            seller_feedback_score=_to_int(seller_info.get("feedbackScore")),
+            category_id=str(category.get("categoryId") or ""),
+            category_name=str(category.get("categoryName") or ""),
+            current_bid=current_bid,
+            bid_count=_to_int(summary.get("bidCount")),
+            end_date=summary.get("itemEndDate"),
+        )
+
+    @staticmethod
+    def _lowest_shipping(summary: dict) -> float | None:
+        costs = []
+        for option in summary.get("shippingOptions") or []:
+            value = (option.get("shippingCost") or {}).get("value")
+            if value is None:
+                continue
+            try:
+                costs.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return min(costs) if costs else None
+
+    def _marketplace_currency(self, marketplace: str | None = None) -> str:
+        return MARKETPLACE_CURRENCY.get(marketplace or self._marketplace_id(), "USD")
 
     @staticmethod
     def _error_text(response: httpx.Response) -> str:
