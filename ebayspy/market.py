@@ -33,6 +33,10 @@ _COLOUR_ASPECTS = ("colour", "color")
 TRIM_LOW_RATIO = 0.4
 TRIM_HIGH_RATIO = 2.5
 
+# A Best Offer is rarely accepted much below ~70% of the asking price, so an offer
+# estimate is only credible when the list price is close enough to it.
+_MIN_OFFER_ACCEPT_RATIO = 0.70
+
 
 def market_price(totals: Iterable[float]) -> float | None:
     """Return a trimmed median of total prices, or None when there is no data."""
@@ -84,6 +88,46 @@ def find_deals(
     floor = price * min_ratio
     deals = [item for item in items if floor <= item.total_price <= threshold]
     deals.sort(key=lambda item: item.total_price)
+    return deals
+
+
+def offer_candidates(
+    items: list[MarketItem],
+    price: float | None,
+    list_discount_percent: float,
+    offer_discount_percent: float,
+    min_ratio: float = TRIM_LOW_RATIO,
+    sold_comps: list[float] | None = None,
+) -> list[tuple[MarketItem, float]]:
+    """Best-Offer listings whose LIST price isn't a deal but a plausible accepted
+    offer would be. Returns (item, estimated_offer_price), cheapest list first.
+
+    An item qualifies when it accepts offers, its list total sits ABOVE the deal
+    threshold (so it isn't already a ``find_deals`` deal) but within a sane band,
+    and the estimated accepted-offer price clears that threshold while staying above
+    the floor. The estimate is ``price*(1 - offer_discount_percent/100)``, lowered
+    (never raised) toward real sold comps when supplied, so insights only sharpens
+    it and the heuristic is the always-available fallback.
+    """
+    if not price or price <= 0:
+        return []
+    threshold = price * (1 - list_discount_percent / 100)
+    floor = price * min_ratio
+    estimate = price * (1 - offer_discount_percent / 100)
+    if sold_comps and (sold := market_price(sold_comps)):
+        estimate = min(estimate, sold)
+    estimate = max(estimate, floor)
+    if estimate > threshold:  # even a good offer wouldn't make it a deal
+        return []
+    # Cap the band so the estimate stays a credible offer off the item's OWN list
+    # price — don't tell the user a seller asking 240 will take 80.
+    ceiling = min(price * TRIM_HIGH_RATIO, estimate / _MIN_OFFER_ACCEPT_RATIO)
+    deals = [
+        (item, estimate)
+        for item in items
+        if item.accepts_offers and threshold < item.total_price <= ceiling
+    ]
+    deals.sort(key=lambda pair: pair[0].total_price)
     return deals
 
 

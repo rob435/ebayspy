@@ -22,6 +22,7 @@ from .market import (
     find_arbitrage,
     find_deals,
     market_price,
+    offer_candidates,
     price_distribution,
     variant_label,
 )
@@ -38,6 +39,8 @@ from .matching import (
 from .models import Listing, MarketItem
 from .storage import (
     Store,
+    _parse_iso_utc,
+    format_health_rows,
     format_interval,
     format_market_rows,
     format_observed_rows,
@@ -65,6 +68,9 @@ class _Deal(NamedTuple):
     ending_soon: bool = False
     low_competition: bool = False
     lot_quantity: int | None = None
+    # For "offer" candidates: the estimated accepted-offer price (the list price
+    # itself is not the deal). None for every other stage.
+    offer_estimate: float | None = None
 
 
 class EbaySpyService:
@@ -89,6 +95,7 @@ class EbaySpyService:
         )
         self.stop_event = asyncio.Event()
         self._check_lock = asyncio.Lock()
+        self._started_at = datetime.now(timezone.utc)
         # watch_id -> tight poll interval while an auction is near its end
         self._auction_turbo: dict[int, int] = {}
         self._arbitrage_due: dict[int, float] = {}
@@ -162,9 +169,22 @@ class EbaySpyService:
         )
         observe_task = asyncio.create_task(self.run_observers())
         market_task = asyncio.create_task(self.run_market_watchers())
+        next_backup = (
+            loop.time() + self.config.backup_interval_seconds
+            if self.config.backup_interval_seconds > 0
+            else None
+        )
         try:
             while not self.stop_event.is_set():
                 await self.check_once()
+                if next_backup is not None and loop.time() >= next_backup:
+                    try:
+                        path = self.store.backup(self.config.backup_dir, self.config.backup_keep)
+                        log.info("Wrote DB backup %s", path)
+                    except Exception:
+                        log.exception("DB backup failed")
+                    next_backup = loop.time() + self.config.backup_interval_seconds
+                await self._maybe_send_heartbeat()
                 try:
                     await asyncio.wait_for(
                         self.stop_event.wait(), timeout=self.config.poll_interval_seconds
@@ -182,7 +202,43 @@ class EbaySpyService:
 
     async def check_once(self) -> int:
         async with self._check_lock:
-            return await self._check_all_sellers()
+            count = await self._check_all_sellers()
+        self._record_poll_health(count)
+        return count
+
+    def _record_poll_health(self, alert_count: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.set_meta("last_poll_ok_at", now)
+        self.store.set_meta("last_poll_alert_count", str(alert_count))
+        if alert_count > 0:
+            self.store.set_meta("last_alert_at", now)
+
+    def health_text(self) -> str:
+        return format_health_rows(
+            self.store.health_snapshot(),
+            started_at=self._started_at,
+            heartbeat_enabled=self.config.heartbeat_enabled,
+        )
+
+    async def _maybe_send_heartbeat(self) -> None:
+        """Send a daily liveness heartbeat when enabled and nothing has been heard
+        within the interval, so a silent crash/stall is noticed."""
+        if not self.config.heartbeat_enabled:
+            return
+        interval = self.config.heartbeat_interval_seconds
+        now = datetime.now(timezone.utc)
+        for key in ("last_alert_at", "last_heartbeat_at"):
+            stamp = self.store.get_meta(key)
+            parsed = _parse_iso_utc(stamp) if stamp else None
+            if parsed is None:
+                continue
+            elapsed = (now - parsed).total_seconds()
+            # A future-dated stamp (clock skew after a restore) must NOT count as
+            # recent liveness, or a real stall would stay silent.
+            if 0 <= elapsed < interval:
+                return  # recent activity already proves liveness
+        await self._notify_text(self.configured_chats(), "💓 Heartbeat\n" + self.health_text())
+        self.store.set_meta("last_heartbeat_at", now.isoformat())
 
     async def _check_all_sellers(self) -> int:
         self.seed_config_sellers()
@@ -246,6 +302,19 @@ class EbaySpyService:
                         chats, listing, previous_quantity, current_quantity
                     )
                     if sent:
+                        total_alert_count += 1
+
+                # Price drops are read BEFORE upsert_active_listings overwrites the
+                # stored price; the floor is recorded only on a successful send so a
+                # failed alert retries next poll instead of being lost.
+                for listing, old_price, new_price, pct in self.store.price_drop_candidates(
+                    listings, self.config.seller_price_drop_percent
+                ):
+                    sent = await self._notify_price_drop_chats(
+                        chats, listing, old_price, new_price, pct
+                    )
+                    if sent:
+                        self.store.mark_price_drop_alerted(listing.item_id, new_price)
                         total_alert_count += 1
 
                 if not listings_truncated:
@@ -601,13 +670,18 @@ class EbaySpyService:
         match = await asyncio.to_thread(vision.match_score, item.image_url, query)
         if match is not None and match < self.config.market_vision_match_threshold:
             return True, ""  # photo doesn't depict the product — likely mistitled/wrong
-        result = await asyncio.to_thread(vision.classify_condition, item.image_url)
-        if result is None:
+        flags = await asyncio.to_thread(vision.vision_flags, item.image_url, item.condition)
+        if flags is None:
             return False, ""
-        label, _score = result
-        if vision.is_condition_upgrade(item.condition, label):
-            return False, f"📸 Photo looks new despite “{item.condition or 'poor'}” — possible gem"
-        return False, f"📸 Image looks {label}"
+        note = vision.compose_note(
+            flags,
+            item.condition,
+            stock_threshold=self.config.market_vision_stock_threshold,
+            damage_threshold=self.config.market_vision_damage_threshold,
+            count_hint=self.config.market_vision_count_hint,
+            count_threshold=self.config.market_vision_count_threshold,
+        )
+        return False, note
 
     def _price_trend_text(self, watch_id: int, variant: str | None) -> str:
         pct = self.store.price_trend(watch_id, variant or "")
@@ -801,6 +875,10 @@ class EbaySpyService:
             if row["discount_percent"] is not None
             else self.config.market_discount_percent
         )
+        if self.config.market_feedback_enabled:
+            # 👍/👎 feedback nudges the required discount; flows through every deal
+            # type since this single value is passed into find_deals/auctions/lots.
+            discount = max(1, min(95, discount + self.store.get_discount_nudge(watch_id)))
         try:
             items, comparable, clusters, dimensions, auctions = await self._sample_market(row)
         except Exception as exc:
@@ -903,6 +981,29 @@ class EbaySpyService:
         # Lot/bundle arbitrage (opt-in per watch).
         candidates.extend(self._lot_candidates(row, items, dimensions, priced, muted, discount))
 
+        # Best-Offer candidates: list price isn't a deal but a plausible accepted
+        # offer would be. Skip items already a list-price deal this cycle.
+        if self.config.market_offer_aware:
+            deal_ids = {c.item.item_id for c in candidates}
+            for label, group in clusters.items():
+                price = priced.get(label)
+                if price is None or label in muted:
+                    continue
+                for item, estimate in offer_candidates(
+                    group,
+                    price,
+                    discount,
+                    self.config.market_expected_offer_discount,
+                    ratio,
+                    sold_comps=comps_by_label.get(label or ""),
+                ):
+                    if item.item_id in deal_ids:
+                        continue
+                    if not self.store.deal_already_alerted(watch_id, item.item_id, "offer"):
+                        candidates.append(
+                            _Deal(item, price, label or None, "offer", offer_estimate=estimate)
+                        )
+
         candidates.sort(key=lambda c: c.item.total_price / c.price)
         first_check = not self.store.market_watch_has_successful_check(watch_id)
         sent_count = 0
@@ -913,6 +1014,7 @@ class EbaySpyService:
             item, price, variant = deal.item, deal.price, deal.variant
             stage, ending_soon, low_comp = deal.stage, deal.ending_soon, deal.low_competition
             lot_qty = deal.lot_quantity
+            offer_estimate = deal.offer_estimate
             risk_score, risk_reasons = risk_metrics.assess(item, price, home_country)
             if risk_score > self.config.market_risk_max:
                 log.info(
@@ -932,10 +1034,13 @@ class EbaySpyService:
                     item.item_id, watch_id,
                 )
                 continue
-            actual_discount = discount_percent_for(item.total_price, price)
+            # Offer candidates are judged on the estimated accepted-offer price,
+            # not the list price.
+            effective_price = offer_estimate if offer_estimate is not None else item.total_price
+            actual_discount = discount_percent_for(effective_price, price)
             profit, roi = estimate_resale_profit(
                 price,
-                item.total_price,
+                effective_price,
                 self.config.market_resale_fee_percent,
                 self.config.market_resale_fee_fixed * (lot_qty or 1),
             )
@@ -958,6 +1063,7 @@ class EbaySpyService:
                 risk=risk_text,
                 lot_quantity=lot_qty,
                 vision=vision_note,
+                offer_estimate=offer_estimate,
             )
             if sent:
                 # Only mark the deal as alerted once it has actually been
@@ -1004,6 +1110,7 @@ class EbaySpyService:
         risk: str = "",
         lot_quantity: int | None = None,
         vision: str = "",
+        offer_estimate: float | None = None,
     ) -> bool:
         sent_any = False
         for chat_id in chats:
@@ -1027,6 +1134,7 @@ class EbaySpyService:
                     risk=risk,
                     lot_quantity=lot_quantity,
                     vision=vision,
+                    offer_estimate=offer_estimate,
                 )
                 sent_any = True
             except Exception:
@@ -1120,6 +1228,18 @@ class EbaySpyService:
                 sent_any = True
             except Exception:
                 log.exception("Failed sending Telegram quantity alert to chat %s", chat_id)
+        return sent_any
+
+    async def _notify_price_drop_chats(
+        self, chats: list[str], listing: Listing, old_price: float, new_price: float, pct: float
+    ) -> bool:
+        sent_any = False
+        for chat_id in chats:
+            try:
+                await self.telegram.notify_price_drop(chat_id, listing, old_price, new_price, pct)
+                sent_any = True
+            except Exception:
+                log.exception("Failed sending Telegram price-drop alert to chat %s", chat_id)
         return sent_any
 
     def status_text(self) -> str:
@@ -1233,6 +1353,8 @@ class EbaySpyService:
             return "Watching:\n" + "\n".join(sellers) if sellers else "No sellers yet."
         if command == "/status":
             return self.status_text()
+        if command == "/health":
+            return self.health_text()
         if command == "/check":
             self.store.add_chat(chat_id, username)
             count = await self.check_once()
@@ -1305,6 +1427,27 @@ class EbaySpyService:
                 return "Muted this listing."
             self.store.mute_market_variant(watch_id, variant)
             return f"Muted the “{variant}” variant — no more alerts for it."
+        if action in ("fu", "fd"):
+            verdict = "good" if action == "fu" else "bad"
+            self.store.record_feedback(watch_id, item_id, verdict)
+            if not self.config.market_feedback_enabled:
+                return "Thanks for the feedback."
+            delta = (
+                self.config.market_feedback_step
+                if verdict == "bad"
+                else -self.config.market_feedback_relax_step
+            )
+            self.store.bump_discount_nudge(
+                watch_id, delta, -self.config.market_feedback_max_nudge,
+                self.config.market_feedback_max_nudge,
+            )
+            base = (
+                row["discount_percent"]
+                if row["discount_percent"] is not None
+                else self.config.market_discount_percent
+            )
+            effective = max(1, min(95, base + self.store.get_discount_nudge(watch_id)))
+            return f"Thanks — required discount now ~{effective:.0f}% for this watch."
         return ""
 
     def _learn_exclude_from_item(self, watch_id: int, item_id: str, query: str) -> str | None:

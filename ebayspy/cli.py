@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("status", help="Show the last check status for each seller")
 
+    backup = subparsers.add_parser("backup", help="Write a timestamped DB snapshot")
+    backup.add_argument("--dir", help="Destination directory (default: BACKUP_DIR)")
+    backup.add_argument("--keep", type=int, help="Snapshots to retain (default: BACKUP_KEEP)")
+
     sellers = subparsers.add_parser("sellers", help="Manage watched sellers")
     seller_sub = sellers.add_subparsers(dest="seller_command", required=True)
     add = seller_sub.add_parser("add", help="Add a seller")
@@ -129,6 +133,14 @@ def main() -> None:
         store = Store(config.sqlite_path)
         try:
             print(format_status_rows(store.status_rows()))
+        finally:
+            store.close()
+    elif args.command == "backup":
+        store = Store(config.sqlite_path)
+        try:
+            dest = args.dir or config.backup_dir
+            keep = args.keep if args.keep is not None else config.backup_keep
+            print(f"Backup written: {store.backup(dest, keep=keep)}")
         finally:
             store.close()
     elif args.command == "sellers":

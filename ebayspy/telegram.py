@@ -252,6 +252,20 @@ class TelegramBot:
             subheader=f"{previous_quantity} → {current_quantity} available",
         )
 
+    async def notify_price_drop(
+        self, chat_id: str, listing: Listing, old_price: float, new_price: float, pct: float
+    ) -> None:
+        # Derive the currency from the listing's own price string so old → new
+        # render in the right units (the amounts arrive as bare floats).
+        tokens = (listing.price or "").split()
+        cur = tokens[-1] if len(tokens) >= 2 and len(tokens[-1]) == 3 and tokens[-1].isalpha() else ""
+        await self._notify_listing_event(
+            chat_id,
+            listing,
+            header="📉 PRICE DROP",
+            subheader=f"{format_money(old_price, cur)} → {format_money(new_price, cur)} (-{pct:.0f}%)",
+        )
+
     async def _notify_listing_event(
         self,
         chat_id: str,
@@ -322,9 +336,11 @@ class TelegramBot:
         risk: str = "",
         lot_quantity: int | None = None,
         vision: str = "",
+        offer_estimate: float | None = None,
     ) -> None:
         saving = market_price - item.total_price
         cur = item.currency
+        is_offer = offer_estimate is not None and not lot_quantity
         if lot_quantity:
             per_unit = item.total_price / lot_quantity
             unit_market = market_price / lot_quantity
@@ -355,21 +371,38 @@ class TelegramBot:
                     f" (range {html.escape(format_money(low, cur))}"
                     f"–{html.escape(format_money(high, cur))})"
                 )
-            if ending_soon:
+            if is_offer:
+                header = "🤝 DEAL IF YOU OFFER"
+                price_line = f"💰 Listed at {html.escape(format_money(item.total_price, cur))}"
+            elif ending_soon:
                 header = "⏰ AUCTION ENDING SOON"
             elif item.is_auction:
                 header = "🔨 AUCTION DEAL"
             else:
                 header = "💸 DEAL FOUND"
+        if is_offer:
+            # Never imply the LIST price is the deal — the saving is conditional
+            # on a successful Best Offer at the estimated price.
+            save_line = (
+                f"🤝 Deal if you offer ≈ {html.escape(format_money(offer_estimate, cur))}"
+                f" (save ≈ {html.escape(format_money(market_price - offer_estimate, cur))})"
+            )
+        else:
+            save_line = f"✅ You save ≈ {html.escape(format_money(saving, item.currency))}"
+        subheader = (
+            f"{discount_percent:.0f}% below market if you offer on “{query}”"
+            if is_offer
+            else f"{discount_percent:.0f}% below market on “{query}”"
+        )
         parts = [
             f"<b>{header}</b>",
-            html.escape(f"{discount_percent:.0f}% below market on “{query}”"),
+            html.escape(subheader),
             "",
             f"<b>{html.escape(item.title)}</b>",
             "",
             price_line,
             market_label,
-            f"✅ You save ≈ {html.escape(format_money(saving, item.currency))}",
+            save_line,
         ]
         if profit is not None:
             roi_text = f" ({roi:+.0f}% ROI)" if roi is not None else ""
@@ -383,7 +416,7 @@ class TelegramBot:
             parts.append(html.escape(trend))
         if demand:
             parts.append(html.escape(demand))
-        if item.accepts_offers:
+        if item.accepts_offers and not is_offer:
             parts.append("💬 Accepts offers — you may get it lower")
         if item.is_auction:
             ends = format_timestamp(item.end_date)
@@ -447,6 +480,13 @@ class TelegramBot:
                 [
                     {"text": "🙈 Mute variant", "callback_data": f"mv:{watch_id}:{item.item_id}"},
                     {"text": "🚫 Not the item", "callback_data": f"bl:{watch_id}:{item.item_id}"},
+                ]
+            )
+            # 👍/👎 feedback tunes the watch's required discount over time.
+            rows.append(
+                [
+                    {"text": "👍", "callback_data": f"fu:{watch_id}:{item.item_id}"},
+                    {"text": "👎", "callback_data": f"fd:{watch_id}:{item.item_id}"},
                 ]
             )
         return {"inline_keyboard": rows}

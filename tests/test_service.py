@@ -53,6 +53,7 @@ class FakeTelegram:
         self.listings: list[tuple[str, str]] = []
         self.ended: list[tuple[str, str]] = []
         self.deals: list[tuple[str, str, float]] = []
+        self.price_drops: list[tuple[str, str, float, float]] = []
 
     async def notify_listing(self, chat_id: str, listing: Listing) -> None:
         self.listings.append((chat_id, listing.item_id))
@@ -68,6 +69,11 @@ class FakeTelegram:
         self.quantity_increases.append(
             (chat_id, listing.item_id, previous_quantity, current_quantity)
         )
+
+    async def notify_price_drop(
+        self, chat_id: str, listing: Listing, old_price: float, new_price: float, pct: float
+    ) -> None:
+        self.price_drops.append((chat_id, listing.item_id, old_price, new_price))
 
     async def notify_deal(
         self,
@@ -90,6 +96,7 @@ class FakeTelegram:
         risk: str = "",
         lot_quantity: int | None = None,
         vision: str = "",
+        offer_estimate: float | None = None,
     ) -> None:
         self.deals.append((chat_id, item.item_id, item.total_price))
 
@@ -116,6 +123,13 @@ class FlakyTelegram(FakeTelegram):
         if self.fail:
             raise RuntimeError("telegram down")
         await super().notify_ended_listing(chat_id, listing, ended_at)
+
+    async def notify_price_drop(
+        self, chat_id: str, listing: Listing, old_price: float, new_price: float, pct: float
+    ) -> None:
+        if self.fail:
+            raise RuntimeError("telegram down")
+        await super().notify_price_drop(chat_id, listing, old_price, new_price, pct)
 
     async def notify_deal(self, chat_id: str, item, **kwargs) -> None:
         if self.fail:
@@ -173,6 +187,22 @@ def _service_config() -> SimpleNamespace:
         ebay_global_id="EBAY-GB",
         market_aliases=(),
         market_watches=(),
+        seller_price_drop_percent=5,
+        market_offer_aware=True,
+        market_expected_offer_discount=10.0,
+        market_vision_stock_threshold=0.55,
+        market_vision_damage_threshold=0.55,
+        market_vision_count_hint=False,
+        market_vision_count_threshold=0.55,
+        market_feedback_enabled=True,
+        market_feedback_step=2.0,
+        market_feedback_relax_step=1.0,
+        market_feedback_max_nudge=10.0,
+        heartbeat_enabled=False,
+        heartbeat_interval_seconds=86400,
+        backup_dir=Path("backups"),
+        backup_keep=7,
+        backup_interval_seconds=86400,
     )
 
 
@@ -1036,5 +1066,128 @@ def test_market_deal_alert_retried_after_send_failure(tmp_path: Path) -> None:
         assert sent == 1
         assert [item_id for _, item_id, _ in telegram.deals] == ["great"]
         assert store.deal_already_alerted(watch_id, "great") is True
+    finally:
+        store.close()
+
+
+def _bo_item(item_id: str, total: float, title: str) -> MarketItem:
+    return MarketItem(
+        item_id=item_id, title=title, url=f"https://example.test/itm/{item_id}",
+        seller="seller", currency="GBP", item_price=total, total_price=total,
+        buying_options=("FIXED_PRICE", "BEST_OFFER"),
+    )
+
+
+def test_check_once_alerts_price_drop(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        item = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                       price="GBP 100.00", url="https://example.test/itm/111111111111")
+        store.mark_seen(item, notified=False)
+        store.upsert_active_listings([item])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+
+        cheaper = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                          price="GBP 80.00", url="https://example.test/itm/111111111111")
+        service.ebay = FakeEbay([cheaper])
+        assert asyncio.run(service.check_once()) == 1
+        assert service.telegram.price_drops == [("chat-1", "111111111111", 100.0, 80.0)]
+
+        # Same low price next poll -> deduped, no re-alert.
+        service.ebay = FakeEbay([cheaper])
+        assert asyncio.run(service.check_once()) == 0
+        assert len(service.telegram.price_drops) == 1
+    finally:
+        store.close()
+
+
+def test_check_once_records_poll_health(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        service.ebay = FakeEbay([])
+        count = asyncio.run(service.check_once())
+        assert store.get_meta("last_poll_ok_at") is not None
+        assert store.get_meta("last_poll_alert_count") == str(count)
+        assert store.health_snapshot()["seller_count"] == 1
+    finally:
+        store.close()
+
+
+def test_offer_candidate_alerted_at_offer_stage(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    # Market median ~200; offer-eligible item at 190 is above the 15% deal threshold
+    # (170) so not a list deal, but a ~15% offer (est 170) would clear it.
+    ebay.market_items = [
+        _bo_item("offer", 190, title),
+        _market_item("a", 195, title), _market_item("b", 200, title),
+        _market_item("c", 205, title), _market_item("d", 210, title),
+        _market_item("e", 200, title),
+    ]
+    service = _market_service(store, ebay)
+    service.config.market_offer_aware = True
+    service.config.market_expected_offer_discount = 15.0
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+        assert sent == 1
+        assert store.get_deal_alert(watch_id, "offer")["stage"] == "offer"
+        assert [item_id for _, item_id, _ in service.telegram.deals] == ["offer"]
+
+        # Disabled -> the same item is not flagged.
+        store2 = Store(tmp_path / "t2.sqlite3")
+        svc2 = _market_service(store2, ebay)
+        svc2.config.market_offer_aware = False
+        wid2 = store2.add_market_watch("dyson airblade hu02")
+        assert asyncio.run(svc2._check_market_watch(store2.get_market_watch(wid2), ["chat-1"])) == 0
+        store2.close()
+    finally:
+        store.close()
+
+
+def test_callback_feedback_tunes_required_discount(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+        reply = asyncio.run(service.handle_callback("chat-1", "user", f"fd:{watch_id}:item-1"))
+        assert store.feedback_counts(watch_id) == (0, 1)
+        assert store.get_discount_nudge(watch_id) == service.config.market_feedback_step
+        assert "discount" in reply.lower()
+
+        asyncio.run(service.handle_callback("chat-1", "user", f"fu:{watch_id}:item-1"))
+        assert store.feedback_counts(watch_id) == (1, 1)
+        assert store.get_discount_nudge(watch_id) == (
+            service.config.market_feedback_step - service.config.market_feedback_relax_step
+        )
+    finally:
+        store.close()
+
+
+def test_handle_command_health(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service._started_at = datetime.now(timezone.utc)
+    try:
+        store.add_seller("seller_one")
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/health", ""))
+        assert "uptime" in reply and "sellers" in reply
     finally:
         store.close()

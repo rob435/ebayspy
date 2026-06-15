@@ -9,7 +9,7 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
 - Sends Telegram alerts with title, price, seller, description snippet, and item link.
 - Shows the seller as a clickable profile link with their eBay rating, e.g. `98.6% (1004)`
   (positive-feedback percentage and total feedback count), plus the listed time, on every
-  alert — new, restock, ended/sold, and market deals.
+  alert — new, restock, price drop, ended/sold, and market deals.
 - Includes listing type, category, and quantity available when eBay returns them.
 - Alerts when eBay reports that an active listing's available quantity increased.
 - Alerts when a previously active watched item disappears, which usually means ended or sold.
@@ -70,8 +70,15 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
     profit & ROI** (market minus buy price minus configurable eBay fees), a **price trend**
     (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, the **price spread** (P10–P90)
     and **recent sold comps** (with Insights), a best-offer flag, the seller rating/link, and
-    inline buttons to open the listing, **mute that variant**, or flag a **wrong match**
-    (which teaches the watch a new exclude term).
+    inline buttons to open the listing, **mute that variant**, flag a **wrong match**
+    (which teaches the watch a new exclude term), or rate the deal **👍/👎** (which tunes the
+    watch's required discount over time).
+  - **Best-offer candidates** (`MARKET_OFFER_AWARE=true`). Flags Best-Offer listings whose
+    *list* price isn't a deal but a plausible accepted offer would be — shown as a separate
+    "**deal if you offer ≈ £X**" alert that never claims the list price is the deal.
+  - **Vision flags** (optional, `MARKET_VISION=true` + the `vision` extra). Beyond verifying
+    the photo matches the product, flags a **stock photo on a used listing** (dropship/scam
+    tell), **possible damage**, and a **multiple-items** lot hint.
   - **Sharper sourcing.** Surfaces **no-bid / low-competition auctions** at a relaxed
     threshold (win uncontested); flags **scam/risk** (new seller, price too-good, foreign
     location) and can suppress the worst; spots **lot/bundle arbitrage** (`/watch … lots:on`)
@@ -105,6 +112,7 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
   - `/remove sellername`
   - `/list`
   - `/status`
+  - `/health` — liveness: uptime, time since last poll, seller/watch counts, errors
   - `/check`
   - `/observe sellername [interval]` — start fast new-listing alerts (e.g. `/observe acme 90s`)
   - `/unobserve sellername`
