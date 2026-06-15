@@ -123,6 +123,8 @@ class Config:
     fx_rates: tuple[tuple[str, float], ...]
     market_aliases: tuple[tuple[str, str], ...]
     market_watches: tuple[str, ...]
+    wake_ahead_hours: float
+    wake_netwait_seconds: float
 
     @classmethod
     def load(cls) -> "Config":
@@ -189,6 +191,8 @@ class Config:
             fx_rates=tuple(_fx_rates_env("FX_RATES")),
             market_aliases=tuple(_aliases_env("ALIASES")),
             market_watches=tuple(_market_watches_env("MARKET_WATCHES")),
+            wake_ahead_hours=_float_env("EBAYSPY_WAKE_HOURS", 6.0),
+            wake_netwait_seconds=_float_env("EBAYSPY_WAKE_NETWAIT", 20.0),
         )
 
     def require_telegram(self) -> None:

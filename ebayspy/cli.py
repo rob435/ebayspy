@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import subprocess
+from datetime import datetime
 
+from . import wake
 from .config import Config
 from .service import EbaySpyService
 from .storage import (
@@ -15,6 +19,8 @@ from .storage import (
     parse_interval,
 )
 
+log = logging.getLogger("ebayspy.cli")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ebayspy")
@@ -23,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("run", help="Run the Telegram tracker (watch + observe loops)")
     subparsers.add_parser("check", help="Run one watch-list poll immediately")
+    subparsers.add_parser(
+        "wakepoll", help="One poll, then arm the next wake (run by the wakepoll LaunchAgent)"
+    )
     subparsers.add_parser("status", help="Show the last check status for each seller")
 
     sellers = subparsers.add_parser("sellers", help="Manage watched sellers")
@@ -65,6 +74,41 @@ async def _run_once(config: Config) -> None:
         await service.close()
 
 
+async def _wakepoll(config: Config) -> None:
+    """One poll while held awake, then arm the next wake so a sleeping Mac
+    returns for the following slot. Run directly by the wakepoll LaunchAgent."""
+    netwait = config.wake_netwait_seconds
+    hours = config.wake_ahead_hours
+
+    caffeinate: subprocess.Popen | None = None
+    try:  # keep the Mac awake for the duration; released when this process exits
+        caffeinate = subprocess.Popen(wake.caffeinate_argv(os.getpid()))
+    except OSError:
+        log.warning("could not start caffeinate; continuing without it", exc_info=True)
+
+    try:
+        if netwait > 0:
+            await asyncio.sleep(netwait)  # let Wi-Fi reconnect after waking
+        await _run_once(config)
+    finally:
+        when = wake.next_wake_time(datetime.now(), hours)
+        try:
+            result = subprocess.run(
+                wake.arm_wake_argv(when), capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                log.info("armed next wake: %s", when)
+            else:
+                log.warning(
+                    "could not arm wake (%s); run once: sudo ./scripts/enable-wake-sudo.sh",
+                    (result.stderr or "").strip() or f"exit {result.returncode}",
+                )
+        except (OSError, subprocess.SubprocessError):
+            log.warning("could not arm next wake", exc_info=True)
+        if caffeinate is not None:
+            caffeinate.terminate()
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -79,6 +123,8 @@ def main() -> None:
         asyncio.run(EbaySpyService(config).run_forever())
     elif args.command == "check":
         asyncio.run(_run_once(config))
+    elif args.command == "wakepoll":
+        asyncio.run(_wakepoll(config))
     elif args.command == "status":
         store = Store(config.sqlite_path)
         try:
