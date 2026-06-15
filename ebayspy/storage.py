@@ -57,6 +57,8 @@ class Store:
                 listing_type text not null default '',
                 category text not null default '',
                 quantity_available text not null default '',
+                seller_feedback_percent text not null default '',
+                seller_feedback_score text not null default '',
                 first_seen_at text not null default current_timestamp,
                 last_seen_at text not null default current_timestamp,
                 ended_at text,
@@ -83,6 +85,82 @@ class Store:
                 key text primary key,
                 value text not null
             );
+
+            create table if not exists market_watches (
+                id integer primary key autoincrement,
+                query text not null,
+                condition text,
+                discount_percent integer,
+                min_price real,
+                max_price real,
+                interval_seconds integer,
+                exclude_terms text,
+                category_id text,
+                include_auctions integer,
+                markets text,
+                owner_chat_id text,
+                created_at text not null default current_timestamp,
+                last_checked_at text,
+                last_ok_at text,
+                last_error text,
+                market_price real,
+                market_variant text,
+                sample_size integer not null default 0,
+                comparable_size integer not null default 0,
+                last_deal_count integer not null default 0,
+                consecutive_errors integer not null default 0,
+                consecutive_empty integer not null default 0,
+                health_alerted integer not null default 0
+            );
+
+            create table if not exists market_deal_alerts (
+                watch_id integer not null,
+                item_id text not null,
+                price real,
+                variant text,
+                title text,
+                stage text not null default 'deal',
+                alerted_at text not null default current_timestamp,
+                primary key (watch_id, item_id)
+            );
+
+            create table if not exists market_blocked_items (
+                watch_id integer not null,
+                item_id text not null,
+                primary key (watch_id, item_id)
+            );
+
+            create table if not exists market_muted_variants (
+                watch_id integer not null,
+                variant text not null,
+                primary key (watch_id, variant)
+            );
+
+            create table if not exists market_price_history (
+                watch_id integer not null,
+                variant text not null default '',
+                price real not null,
+                sampled_at text not null default current_timestamp
+            );
+            create index if not exists idx_market_price_history
+                on market_price_history(watch_id, variant, sampled_at);
+
+            create table if not exists market_listings (
+                watch_id integer not null,
+                item_id text not null,
+                variant text not null default '',
+                price real,
+                currency text not null default '',
+                listed_at text,
+                first_seen_at text not null default current_timestamp,
+                last_seen_at text not null default current_timestamp,
+                checks_seen integer not null default 1,
+                price_drops integer not null default 0,
+                ended_at text,
+                primary key (watch_id, item_id)
+            );
+            create index if not exists idx_market_listings
+                on market_listings(watch_id, ended_at);
             """
         )
         self.conn.commit()
@@ -103,6 +181,8 @@ class Store:
             "listing_type": "text not null default ''",
             "category": "text not null default ''",
             "quantity_available": "text not null default ''",
+            "seller_feedback_percent": "text not null default ''",
+            "seller_feedback_score": "text not null default ''",
             "ended_at": "text",
             "ended_notified_at": "text",
         }
@@ -117,6 +197,33 @@ class Store:
         chat_columns = self._table_columns("telegram_chats")
         if "username" not in chat_columns:
             self.conn.execute("alter table telegram_chats add column username text")
+        market_columns = self._table_columns("market_watches")
+        market_defaults = {
+            "exclude_terms": "text",
+            "category_id": "text",
+            "include_auctions": "integer",
+            "markets": "text",
+            "owner_chat_id": "text",
+            "market_variant": "text",
+            "comparable_size": "integer not null default 0",
+            "consecutive_errors": "integer not null default 0",
+            "consecutive_empty": "integer not null default 0",
+            "health_alerted": "integer not null default 0",
+        }
+        for column, definition in market_defaults.items():
+            if column not in market_columns:
+                self.conn.execute(f"alter table market_watches add column {column} {definition}")
+        alert_columns = self._table_columns("market_deal_alerts")
+        alert_defaults = {
+            "variant": "text",
+            "title": "text",
+            "stage": "text not null default 'deal'",
+        }
+        for column, definition in alert_defaults.items():
+            if column not in alert_columns:
+                self.conn.execute(
+                    f"alter table market_deal_alerts add column {column} {definition}"
+                )
         self.conn.commit()
 
     def _table_columns(self, table: str) -> set[str]:
@@ -299,6 +406,412 @@ class Store:
         )
         self.conn.commit()
 
+    def add_market_watch(
+        self,
+        query: str,
+        *,
+        condition: str | None = None,
+        discount_percent: int | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        interval_seconds: int | None = None,
+        exclude_terms: str | None = None,
+        category_id: str | None = None,
+        include_auctions: bool | None = None,
+        markets: str | None = None,
+        owner_chat_id: str | None = None,
+    ) -> int | None:
+        query = normalize_market_query(query)
+        if not query:
+            return None
+        if self.has_market_watch(query, condition):
+            return None
+        cur = self.conn.execute(
+            """
+            insert into market_watches(
+                query, condition, discount_percent, min_price, max_price,
+                interval_seconds, exclude_terms, category_id, include_auctions, markets,
+                owner_chat_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                query,
+                condition,
+                discount_percent,
+                min_price,
+                max_price,
+                interval_seconds,
+                exclude_terms,
+                category_id,
+                None if include_auctions is None else int(include_auctions),
+                markets,
+                owner_chat_id,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def set_market_category(self, watch_id: int, category_id: str | None) -> bool:
+        cur = self.conn.execute(
+            "update market_watches set category_id = ? where id = ?",
+            (category_id, watch_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def has_market_watch(self, query: str, condition: str | None = None) -> bool:
+        row = self.conn.execute(
+            """
+            select 1 from market_watches
+            where lower(query) = lower(?)
+              and coalesce(lower(condition), '') = coalesce(lower(?), '')
+            limit 1
+            """,
+            (normalize_market_query(query), condition),
+        ).fetchone()
+        return row is not None
+
+    def remove_market_watch(self, watch_id: int) -> bool:
+        cur = self.conn.execute("delete from market_watches where id = ?", (watch_id,))
+        for table in (
+            "market_deal_alerts",
+            "market_blocked_items",
+            "market_muted_variants",
+            "market_price_history",
+            "market_listings",
+        ):
+            self.conn.execute(f"delete from {table} where watch_id = ?", (watch_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_market_watch(self, watch_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "select * from market_watches where id = ?", (watch_id,)
+        ).fetchone()
+
+    def list_market_watches(self) -> list[sqlite3.Row]:
+        return self.conn.execute("select * from market_watches order by id").fetchall()
+
+    def update_market_price(
+        self,
+        watch_id: int,
+        price: float | None,
+        sample_size: int,
+        comparable_size: int,
+        variant: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            update market_watches
+            set market_price = ?, market_variant = ?, sample_size = ?, comparable_size = ?
+            where id = ?
+            """,
+            (price, variant, sample_size, comparable_size, watch_id),
+        )
+        self.conn.commit()
+
+    def record_market_check(
+        self, watch_id: int, deal_count: int, error: str | None = None, empty: bool = False
+    ) -> None:
+        self.conn.execute(
+            """
+            update market_watches set
+                last_checked_at = current_timestamp,
+                last_ok_at = case when ? is null then current_timestamp else last_ok_at end,
+                last_error = ?,
+                last_deal_count = ?,
+                consecutive_errors = case when ? is null then 0 else consecutive_errors + 1 end,
+                consecutive_empty = case when ? then consecutive_empty + 1 else 0 end
+            where id = ?
+            """,
+            (error, error, deal_count, error, 1 if empty else 0, watch_id),
+        )
+        self.conn.commit()
+
+    def check_market_health(self, watch_id: int, threshold: int) -> str | None:
+        """Return a one-off health message when a watch first crosses a failure
+        threshold (repeated errors or no comparables), and clears the flag once
+        it recovers so a future problem alerts again."""
+        row = self.get_market_watch(watch_id)
+        if row is None:
+            return None
+        problem = None
+        if row["consecutive_errors"] >= threshold:
+            problem = (
+                f"has errored {row['consecutive_errors']} checks in a row: "
+                f"{(row['last_error'] or '')[:120]}"
+            )
+        elif row["consecutive_empty"] >= threshold:
+            problem = (
+                f"has found no comparable listings for {row['consecutive_empty']} checks — "
+                "the query may be too narrow or wrong."
+            )
+        if problem and not row["health_alerted"]:
+            self.conn.execute(
+                "update market_watches set health_alerted = 1 where id = ?", (watch_id,)
+            )
+            self.conn.commit()
+            return problem
+        if not problem and row["health_alerted"]:
+            self.conn.execute(
+                "update market_watches set health_alerted = 0 where id = ?", (watch_id,)
+            )
+            self.conn.commit()
+        return None
+
+    def market_watch_has_successful_check(self, watch_id: int) -> bool:
+        row = self.conn.execute(
+            "select 1 from market_watches where id = ? and last_ok_at is not null",
+            (watch_id,),
+        ).fetchone()
+        return row is not None
+
+    def set_market_interval(self, watch_id: int, interval_seconds: int | None) -> bool:
+        cur = self.conn.execute(
+            "update market_watches set interval_seconds = ? where id = ?",
+            (interval_seconds, watch_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def deal_already_alerted(self, watch_id: int, item_id: str, stage: str = "deal") -> bool:
+        row = self.conn.execute(
+            "select 1 from market_deal_alerts where watch_id = ? and item_id = ? and stage = ?",
+            (watch_id, item_id, stage),
+        ).fetchone()
+        return row is not None
+
+    def record_deal_alert(
+        self,
+        watch_id: int,
+        item_id: str,
+        price: float,
+        variant: str | None = None,
+        title: str | None = None,
+        stage: str = "deal",
+    ) -> None:
+        self.conn.execute(
+            """
+            insert into market_deal_alerts(watch_id, item_id, price, variant, title, stage)
+            values (?, ?, ?, ?, ?, ?)
+            on conflict(watch_id, item_id) do update set
+                price = excluded.price,
+                variant = coalesce(excluded.variant, market_deal_alerts.variant),
+                title = coalesce(excluded.title, market_deal_alerts.title),
+                stage = excluded.stage,
+                alerted_at = current_timestamp
+            """,
+            (watch_id, item_id, price, variant, title, stage),
+        )
+        self.conn.commit()
+
+    def get_deal_alert(self, watch_id: int, item_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "select * from market_deal_alerts where watch_id = ? and item_id = ?",
+            (watch_id, item_id),
+        ).fetchone()
+
+    def block_market_item(self, watch_id: int, item_id: str) -> None:
+        self.conn.execute(
+            "insert or ignore into market_blocked_items(watch_id, item_id) values (?, ?)",
+            (watch_id, item_id),
+        )
+        self.conn.commit()
+
+    def blocked_item_ids(self, watch_id: int) -> set[str]:
+        rows = self.conn.execute(
+            "select item_id from market_blocked_items where watch_id = ?", (watch_id,)
+        ).fetchall()
+        return {row["item_id"] for row in rows}
+
+    def mute_market_variant(self, watch_id: int, variant: str) -> None:
+        self.conn.execute(
+            "insert or ignore into market_muted_variants(watch_id, variant) values (?, ?)",
+            (watch_id, variant),
+        )
+        self.conn.commit()
+
+    def muted_variants(self, watch_id: int) -> set[str]:
+        rows = self.conn.execute(
+            "select variant from market_muted_variants where watch_id = ?", (watch_id,)
+        ).fetchall()
+        return {row["variant"] for row in rows}
+
+    def record_price_sample(self, watch_id: int, variant: str | None, price: float) -> None:
+        self.conn.execute(
+            "insert into market_price_history(watch_id, variant, price) values (?, ?, ?)",
+            (watch_id, variant or "", price),
+        )
+        self.conn.execute(
+            "delete from market_price_history "
+            "where watch_id = ? and sampled_at < datetime('now', '-120 days')",
+            (watch_id,),
+        )
+        self.conn.commit()
+
+    def price_trend(
+        self, watch_id: int, variant: str | None, window_days: int = 7
+    ) -> float | None:
+        """Percent change of the latest price vs the most recent sample at least
+        ``window_days`` old. None until that much history exists."""
+        params = (watch_id, variant or "")
+        latest = self.conn.execute(
+            "select price from market_price_history "
+            "where watch_id = ? and variant = ? order by sampled_at desc limit 1",
+            params,
+        ).fetchone()
+        baseline = self.conn.execute(
+            "select price from market_price_history "
+            "where watch_id = ? and variant = ? and sampled_at <= datetime('now', ?) "
+            "order by sampled_at desc limit 1",
+            (watch_id, variant or "", f"-{int(window_days)} days"),
+        ).fetchone()
+        if latest is None or baseline is None or not baseline["price"]:
+            return None
+        return (latest["price"] - baseline["price"]) / baseline["price"] * 100
+
+    def record_market_sightings(
+        self, watch_id: int, sightings: list[tuple[str, str, float | None, str, str | None]]
+    ) -> None:
+        """Upsert each currently-seen listing's lifecycle row.
+
+        ``sightings`` is (item_id, variant, price, currency, listed_at). A price
+        below the previously recorded one counts as a price drop (a soft
+        soft-demand signal), and a reappearing listing is reactivated.
+        """
+        self.conn.executemany(
+            """
+            insert into market_listings(
+                watch_id, item_id, variant, price, currency, listed_at
+            ) values (?, ?, ?, ?, ?, ?)
+            on conflict(watch_id, item_id) do update set
+                last_seen_at = current_timestamp,
+                checks_seen = market_listings.checks_seen + 1,
+                price_drops = market_listings.price_drops + (
+                    case when excluded.price is not null
+                              and market_listings.price is not null
+                              and excluded.price < market_listings.price
+                         then 1 else 0 end
+                ),
+                price = excluded.price,
+                variant = excluded.variant,
+                ended_at = null
+            """,
+            [
+                (watch_id, item_id, variant or "", price, currency or "", listed_at)
+                for item_id, variant, price, currency, listed_at in sightings
+            ],
+        )
+        self.conn.commit()
+
+    def mark_disappeared_listings(
+        self, watch_id: int, seen_item_ids: set[str], grace_seconds: int
+    ) -> int:
+        """Mark listings absent beyond the grace period as ended (≈ sold/pulled).
+
+        The grace guards against Best-Match ranking churn briefly dropping a
+        still-live listing from the sample.
+        """
+        placeholders = ",".join("?" for _ in seen_item_ids) or "''"
+        cur = self.conn.execute(
+            f"""
+            update market_listings set ended_at = last_seen_at
+            where watch_id = ?
+              and ended_at is null
+              and last_seen_at < datetime('now', ?)
+              and item_id not in ({placeholders})
+            """,
+            (watch_id, f"-{int(grace_seconds)} seconds", *seen_item_ids),
+        )
+        self.conn.execute(
+            "delete from market_listings "
+            "where watch_id = ? and ended_at is not null "
+            "and ended_at < datetime('now', '-60 days')",
+            (watch_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def market_demand_stats(self, watch_id: int, window_days: int) -> dict:
+        window = f"-{int(window_days)} days"
+
+        def scalar(sql: str, *params) -> float:
+            row = self.conn.execute(sql, params).fetchone()
+            return (row[0] if row and row[0] is not None else 0) or 0
+
+        active_count = int(
+            scalar("select count(*) from market_listings where watch_id=? and ended_at is null",
+                   watch_id)
+        )
+        ended_in_window = int(
+            scalar(
+                "select count(*) from market_listings "
+                "where watch_id=? and ended_at >= datetime('now', ?)",
+                watch_id, window,
+            )
+        )
+        new_in_window = int(
+            scalar(
+                "select count(*) from market_listings "
+                "where watch_id=? and first_seen_at >= datetime('now', ?)",
+                watch_id, window,
+            )
+        )
+        avg_drops = scalar(
+            "select avg(price_drops) from market_listings where watch_id=? and ended_at is null",
+            watch_id,
+        )
+        history_days = scalar(
+            "select julianday('now') - julianday(min(first_seen_at)) "
+            "from market_listings where watch_id=?",
+            watch_id,
+        )
+        lifespans = [
+            row[0] * 86400
+            for row in self.conn.execute(
+                "select julianday(ended_at) - julianday(first_seen_at) from market_listings "
+                "where watch_id=? and ended_at >= datetime('now', ?)",
+                (watch_id, window),
+            ).fetchall()
+            if row[0] is not None
+        ]
+        active_ages = [
+            row[0] * 86400
+            for row in self.conn.execute(
+                "select julianday('now') - julianday(listed_at) from market_listings "
+                "where watch_id=? and ended_at is null and listed_at is not null",
+                (watch_id,),
+            ).fetchall()
+            if row[0] is not None and row[0] >= 0
+        ]
+        return {
+            "active_count": active_count,
+            "ended_in_window": ended_in_window,
+            "new_in_window": new_in_window,
+            "avg_drops": float(avg_drops),
+            "history_days": float(history_days),
+            "lifespans": lifespans,
+            "active_ages": active_ages,
+        }
+
+    def append_exclude_term(self, watch_id: int, term: str) -> bool:
+        term = term.strip().lower()
+        if not term:
+            return False
+        row = self.get_market_watch(watch_id)
+        if row is None:
+            return False
+        existing = [t.strip().lower() for t in (row["exclude_terms"] or "").split(",") if t.strip()]
+        if term in existing:
+            return False
+        existing.append(term)
+        self.conn.execute(
+            "update market_watches set exclude_terms = ? where id = ?",
+            (", ".join(existing), watch_id),
+        )
+        self.conn.commit()
+        return True
+
     def recent_active_item_ids(self, seller: str, limit: int = 5) -> list[str]:
         rows = self.conn.execute(
             """
@@ -427,11 +940,13 @@ class Store:
                 listing_type,
                 category,
                 quantity_available,
+                seller_feedback_percent,
+                seller_feedback_score,
                 last_seen_at,
                 ended_at,
                 ended_notified_at
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp, null, null)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp, null, null)
             on conflict(item_id) do update set
                 seller = excluded.seller,
                 title = excluded.title,
@@ -443,6 +958,8 @@ class Store:
                 listing_type = excluded.listing_type,
                 category = excluded.category,
                 quantity_available = excluded.quantity_available,
+                seller_feedback_percent = excluded.seller_feedback_percent,
+                seller_feedback_score = excluded.seller_feedback_score,
                 last_seen_at = current_timestamp,
                 ended_at = null,
                 ended_notified_at = null
@@ -460,13 +977,17 @@ class Store:
                     item.listing_type,
                     item.category,
                     item.quantity_available,
+                    item.seller_feedback_percent,
+                    item.seller_feedback_score,
                 )
                 for item in listings
             ],
         )
         self.conn.commit()
 
-    def ended_candidates(self, seller: str, active_item_ids: set[str]) -> list[Listing]:
+    def ended_candidates(
+        self, seller: str, active_item_ids: set[str]
+    ) -> list[tuple[Listing, str | None]]:
         if active_item_ids:
             placeholders = ",".join("?" for _ in active_item_ids)
             query = f"""
@@ -488,7 +1009,7 @@ class Store:
             """
             params = (seller,)
         rows = self.conn.execute(query, params).fetchall()
-        return [self._listing_from_row(row) for row in rows]
+        return [(self._listing_from_row(row), row["last_seen_at"]) for row in rows]
 
     def quantity_increase_candidates(self, listings: list[Listing]) -> list[tuple[Listing, int, int]]:
         increases = []
@@ -535,6 +1056,8 @@ class Store:
             listing_type=row["listing_type"],
             category=row["category"],
             quantity_available=row["quantity_available"],
+            seller_feedback_percent=row["seller_feedback_percent"],
+            seller_feedback_score=row["seller_feedback_score"],
         )
 
 
@@ -587,6 +1110,53 @@ def format_observed_rows(rows: list[sqlite3.Row], default_interval_seconds: int)
                 f"{row['username']}: every {every}, {new} new last check, checked {observed}"
             )
     return "Observing:\n" + "\n".join(lines)
+
+
+def normalize_market_query(value: str | None) -> str:
+    return " ".join((value or "").split())
+
+
+def format_market_rows(
+    rows: list[sqlite3.Row],
+    default_interval_seconds: int,
+    default_discount_percent: int,
+    trends: dict[int, str] | None = None,
+) -> str:
+    if not rows:
+        return "No market watches yet. Add one with /watch <search terms>."
+    trends = trends or {}
+    lines = []
+    for row in rows:
+        discount = (
+            row["discount_percent"]
+            if row["discount_percent"] is not None
+            else default_discount_percent
+        )
+        interval = row["interval_seconds"] or default_interval_seconds
+        details = []
+        if row["condition"]:
+            details.append(str(row["condition"]))
+        details.append(f"-{discount}%")
+        details.append(f"every {format_interval(interval)}")
+        if row["market_price"] is not None:
+            comparable = row["comparable_size"]
+            variant = f" [{row['market_variant']}]" if row["market_variant"] else ""
+            details.append(
+                f"market ≈ {row['market_price']:.2f}{variant} "
+                f"({comparable} comparable/{row['sample_size']})"
+            )
+        else:
+            details.append("market pending")
+        if row["category_id"]:
+            details.append(f"cat {row['category_id']}")
+        if trends.get(row["id"]):
+            details.append(trends[row["id"]])
+        if row["exclude_terms"]:
+            details.append(f"excl: {row['exclude_terms']}")
+        if row["last_error"]:
+            details.append("⚠ error")
+        lines.append(f"#{row['id']} {row['query']}\n   " + " · ".join(details))
+    return "Market watches:\n" + "\n".join(lines)
 
 
 def parse_interval(value: str | None) -> int | None:

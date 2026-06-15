@@ -4,11 +4,13 @@ from ebayspy.models import Listing
 from ebayspy.storage import (
     Store,
     format_interval,
+    format_market_rows,
     format_observed_rows,
     format_status_rows,
     is_valid_ebay_username,
     is_valid_telegram_username,
     normalize_ebay_username,
+    normalize_market_query,
     normalize_telegram_username,
     parse_interval,
 )
@@ -101,10 +103,11 @@ def test_store_tracks_ended_candidates(tmp_path: Path) -> None:
         store.upsert_active_listings([first, second])
         ended = store.ended_candidates("seller_one", {"456"})
 
-        assert [listing.item_id for listing in ended] == ["123"]
-        assert ended[0].listing_type == "Auction"
-        assert ended[0].category == "Collectibles"
-        assert ended[0].quantity_available == "1"
+        assert [listing.item_id for listing, _ in ended] == ["123"]
+        assert ended[0][0].listing_type == "Auction"
+        assert ended[0][0].category == "Collectibles"
+        assert ended[0][0].quantity_available == "1"
+        assert ended[0][1] is not None  # last_seen_at fallback for the ended date
 
         store.mark_ended_notified("123")
 
@@ -279,6 +282,180 @@ def test_observed_sellers_crud_and_interval(tmp_path: Path) -> None:
 
         assert store.remove_observed_seller("seller_one")
         assert store.list_observed_sellers() == []
+    finally:
+        store.close()
+
+
+def test_market_watch_crud_and_dedupe(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch(
+            "  Dyson   Airblade HU02 ", condition="new", discount_percent=20, max_price=600
+        )
+        assert isinstance(watch_id, int)
+
+        # Normalized + case-insensitive dedupe on query + condition.
+        assert store.has_market_watch("dyson airblade hu02", condition="new")
+        assert store.add_market_watch("Dyson Airblade HU02", condition="new") is None
+        # A different condition is a distinct watch.
+        other = store.add_market_watch("Dyson Airblade HU02", condition="used")
+        assert isinstance(other, int) and other != watch_id
+
+        row = store.get_market_watch(watch_id)
+        assert row["query"] == "Dyson Airblade HU02"
+        assert row["condition"] == "new"
+        assert row["discount_percent"] == 20
+        assert row["max_price"] == 600
+
+        assert len(store.list_market_watches()) == 2
+        assert store.remove_market_watch(watch_id) is True
+        assert store.get_market_watch(watch_id) is None
+        assert store.has_market_watch("Dyson Airblade HU02", condition="new") is False
+    finally:
+        store.close()
+
+
+def test_market_price_and_check_recording(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+        assert store.market_watch_has_successful_check(watch_id) is False
+
+        store.update_market_price(watch_id, 412.5, sample_size=37, comparable_size=28)
+        store.record_market_check(watch_id, deal_count=2)
+
+        row = store.get_market_watch(watch_id)
+        assert row["market_price"] == 412.5
+        assert row["sample_size"] == 37
+        assert row["comparable_size"] == 28
+        assert row["last_deal_count"] == 2
+        assert store.market_watch_has_successful_check(watch_id) is True
+
+        # An errored check does not count as a successful one.
+        store.record_market_check(watch_id, deal_count=0, error="boom")
+        assert store.get_market_watch(watch_id)["last_error"] == "boom"
+    finally:
+        store.close()
+
+
+def test_market_deal_alert_dedupe(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+        assert store.deal_already_alerted(watch_id, "item-1") is False
+
+        store.record_deal_alert(watch_id, "item-1", price=300.0)
+        assert store.deal_already_alerted(watch_id, "item-1") is True
+
+        # Removing the watch clears its recorded deal alerts.
+        store.remove_market_watch(watch_id)
+        assert store.deal_already_alerted(watch_id, "item-1") is False
+    finally:
+        store.close()
+
+
+def test_market_health_alert_fires_once_then_recovers(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("obscure thing")
+        for _ in range(3):
+            store.record_market_check(watch_id, deal_count=0, error="boom")
+        # Below threshold -> no alert yet.
+        assert store.check_market_health(watch_id, threshold=5) is None
+        for _ in range(2):
+            store.record_market_check(watch_id, deal_count=0, error="boom")
+        # Crossed threshold -> one alert.
+        msg = store.check_market_health(watch_id, threshold=5)
+        assert msg is not None and "errored" in msg
+        # Does not re-alert while still failing.
+        store.record_market_check(watch_id, deal_count=0, error="boom")
+        assert store.check_market_health(watch_id, threshold=5) is None
+        # Recovers -> counter resets, flag clears.
+        store.record_market_check(watch_id, deal_count=1)
+        assert store.check_market_health(watch_id, threshold=5) is None
+        assert store.get_market_watch(watch_id)["consecutive_errors"] == 0
+    finally:
+        store.close()
+
+
+def test_price_trend(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+        # No history yet -> no trend.
+        assert store.price_trend(watch_id, "256gb") is None
+
+        # Backdate a baseline 10 days ago, then a recent lower sample.
+        store.conn.execute(
+            "insert into market_price_history(watch_id, variant, price, sampled_at) "
+            "values (?, ?, ?, datetime('now', '-10 days'))",
+            (watch_id, "256gb", 400.0),
+        )
+        store.record_price_sample(watch_id, "256gb", 360.0)
+
+        pct = store.price_trend(watch_id, "256gb", window_days=7)
+        assert pct is not None and round(pct, 1) == -10.0
+    finally:
+        store.close()
+
+
+def test_market_lifecycle_and_demand_stats(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iphone 13")
+        # First sighting of three listings.
+        store.record_market_sightings(
+            watch_id,
+            [
+                ("a", "256gb", 400.0, "GBP", None),
+                ("b", "256gb", 410.0, "GBP", None),
+                ("c", "256gb", 420.0, "GBP", None),
+            ],
+        )
+        # Next cycle: 'b' cheaper (a price drop), 'c' stays, 'a' not re-seen.
+        store.record_market_sightings(
+            watch_id,
+            [("b", "256gb", 390.0, "GBP", None), ("c", "256gb", 420.0, "GBP", None)],
+        )
+        # Backdate 'a' so it is older than the grace window, then sweep.
+        store.conn.execute(
+            "update market_listings set last_seen_at = datetime('now', '-2 days') "
+            "where watch_id=? and item_id='a'",
+            (watch_id,),
+        )
+        ended = store.mark_disappeared_listings(watch_id, {"b", "c"}, grace_seconds=86400)
+        assert ended == 1  # 'a' disappeared
+
+        stats = store.market_demand_stats(watch_id, window_days=14)
+        assert stats["active_count"] == 2  # b, c
+        assert stats["ended_in_window"] == 1  # a
+        # 'b' had a price cut recorded.
+        row = store.conn.execute(
+            "select price_drops from market_listings where watch_id=? and item_id='b'", (watch_id,)
+        ).fetchone()
+        assert row["price_drops"] == 1
+    finally:
+        store.close()
+
+
+def test_normalize_market_query() -> None:
+    assert normalize_market_query("  Dyson   Airblade\tHU02 ") == "Dyson Airblade HU02"
+    assert normalize_market_query(None) == ""
+
+
+def test_format_market_rows(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        assert "No market watches yet" in format_market_rows([], 600, 15)
+
+        watch_id = store.add_market_watch("iphone 13", condition="used")
+        store.update_market_price(watch_id, 412.5, sample_size=40, comparable_size=25)
+        text = format_market_rows(store.list_market_watches(), 600, 15)
+
+        assert f"#{watch_id} iphone 13" in text
+        assert "used" in text
+        assert "-15%" in text  # falls back to the default discount
+        assert "market ≈ 412.50 (25 comparable/40)" in text
     finally:
         store.close()
 

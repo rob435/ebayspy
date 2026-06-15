@@ -9,6 +9,7 @@ from .service import EbaySpyService
 from .storage import (
     Store,
     format_interval,
+    format_market_rows,
     format_observed_rows,
     format_status_rows,
     parse_interval,
@@ -40,6 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     observe_remove = observe_sub.add_parser("remove", help="Remove a seller from the observe list")
     observe_remove.add_argument("username")
     observe_sub.add_parser("list", help="List observe-list sellers")
+
+    market = subparsers.add_parser("market", help="Manage below-market deal watches")
+    market_sub = market.add_subparsers(dest="market_command", required=True)
+    market_add = market_sub.add_parser("add", help="Add a market watch")
+    market_add.add_argument("query", help="Search terms, e.g. 'dyson airblade hu02'")
+    market_add.add_argument("--condition", choices=["new", "used"])
+    market_add.add_argument("--under", type=float, help="Max price to consider")
+    market_add.add_argument("--discount", type=int, help="Discount %% under market that's a deal")
+    market_add.add_argument("--category", help="Numeric eBay category id to focus on")
+    market_remove = market_sub.add_parser("remove", help="Remove a market watch by id")
+    market_remove.add_argument("id", type=int)
+    market_sub.add_parser("list", help="List market watches")
     return parser
 
 
@@ -105,5 +118,32 @@ def main() -> None:
             elif args.observe_command == "list":
                 rows = store.list_observed_sellers()
                 print(format_observed_rows(rows, config.observe_interval_seconds))
+        finally:
+            store.close()
+    elif args.command == "market":
+        store = Store(config.sqlite_path)
+        try:
+            if args.market_command == "add":
+                watch_id = store.add_market_watch(
+                    args.query,
+                    condition=args.condition,
+                    discount_percent=args.discount,
+                    max_price=args.under,
+                    category_id=args.category,
+                )
+                if watch_id is None:
+                    print(f"Already watching the market for: {args.query}")
+                else:
+                    print(f"Watching the market for “{args.query}” (#{watch_id}).")
+            elif args.market_command == "remove":
+                print("Removed." if store.remove_market_watch(args.id) else "No watch with that id.")
+            elif args.market_command == "list":
+                print(
+                    format_market_rows(
+                        store.list_market_watches(),
+                        config.market_interval_seconds,
+                        config.market_discount_percent,
+                    )
+                )
         finally:
             store.close()
