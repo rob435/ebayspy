@@ -9,11 +9,24 @@ listings with a few high-signal, dependency-free heuristics:
   * Model numbers — alphanumeric codes like ``hu02`` or ``g991b`` are the
     strongest single signal of a specific product. If the query carries one, a
     comparable title must carry it too. This alone rejects HU01/HU03 variants
-    and most accessories.
+    and most accessories. Codes are read tolerant of how they are written —
+    ``WH-1000XM5`` ≡ ``WH1000XM5`` — so a stray hyphen never drops a comparable.
+  * Edition designators — the lone letter in *Xbox Series X* vs *Series S*, the
+    *Mark II* / *mk2* in a camera body, and bare roman generations (*A7 III* vs
+    *A7 II*) name different products that share every other word, so they are
+    pinned exactly in both directions. Plain digits read like a human, too:
+    ``2nd Gen`` ≡ ``2`` and ``S21+`` ≡ ``S21 Plus``.
+  * Niche attributes — when the query names them, a graded-card grade
+    (``PSA 10`` ≠ ``PSA 9``, and ``PSA10`` ≡ ``PSA 10``), a fragrance
+    concentration (``EDP`` ≠ ``EDT``, ``Eau de Parfum`` ≡ ``EDP``), a liquid
+    volume (``100ml`` ≠ ``60ml``), a long reference number with a sub-variant
+    suffix (``116610`` ≡ ``116610LN``), and an aperture (``f/1.8`` ≡ ``f1.8``)
+    are all read the way a collector would.
   * Accessory / parts / lot / damage vocabulary — a title that *introduces*
     these words (when the query did not) is almost never the item itself.
   * Content coverage — the brand and key nouns from the query must mostly appear
-    in the title, catching unrelated results the keyword search slipped in.
+    in the title (plurals folded so ``games`` covers ``game``), catching
+    unrelated results the keyword search slipped in.
 
 It is deliberately rule-based rather than ML: fast enough to run over every
 listing on every poll, explainable, and dependency-free. Precision is favoured
@@ -106,12 +119,15 @@ EXCLUSION_PHRASES = {
 # ask for must not appear in a comparable, and one it did ask for is required.
 QUALIFIERS = {
     "pro", "max", "mini", "plus", "ultra", "se", "air", "lite", "digital",
-    "slim", "premium", "deluxe",
+    "slim", "premium", "deluxe", "oled",
+    # Fragrance concentration — a genuinely different product at a different price
+    # (EDP ≠ EDT ≠ EDC), so it pins when named and is priced per-cluster otherwise.
+    "edp", "edt", "edc",
 }
 # Reading order for a multi-qualifier label, e.g. {"pro", "max"} -> "pro max".
 QUALIFIER_ORDER = [
-    "pro", "max", "plus", "ultra", "mini", "se", "air", "lite", "digital",
-    "slim", "premium", "deluxe",
+    "pro", "max", "plus", "ultra", "mini", "se", "air", "lite", "oled", "digital",
+    "slim", "premium", "deluxe", "edp", "edt", "edc",
 ]
 
 # Variant attributes — same product, different flavour. The query pins them when
@@ -146,16 +162,49 @@ _UNIT_RE = re.compile(
     r")$"
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_HYPHEN_PAIR_RE = re.compile(r"([a-z0-9]+)-([a-z0-9]+)")
+# "+" tacked onto a model name means the Plus model line (Galaxy S21+, Note 20+);
+# tokenizing drops the symbol, so spell it out first so it matches "... Plus".
+_PLUS_RE = re.compile(r"(?<=[a-z0-9])\+")
+# Camera aperture: "f/1.8" and "f1.8" are the same lens — drop the slash so they
+# tokenize alike (the decimal still splits, but identically on both sides).
+_APERTURE_RE = re.compile(r"\bf\s*/\s*(\d)")
+# Graded trading cards write the grade glued ("PSA10", "BGS9.5") or spaced
+# ("PSA 10"); split the known grading prefixes so both forms land on "<co> <n>"
+# and the grade number (the price driver) is pinned as a discriminator.
+_GRADE_RE = re.compile(r"\b(psa|bgs|cgc|sgc)\s*(\d+(?:\.\d+)?)\b")
 
 DEFAULT_COVERAGE = 0.6
 
 
+def _join_model_hyphens(text: str) -> str:
+    """Fold the hyphen out of a model code so its written forms unify.
+
+    A model code is hyphenated inconsistently across listings — "WH-1000XM5",
+    "WH1000XM5", "SM-G991B", "F-150" — and a human reads them all as one token.
+    The digit is the tell: join the two sides only when one of them carries a
+    number, so genuine hyphenated words ("t-shirt", "wi-fi", "blu-ray") are left
+    intact. Applied to query and title alike, so every form lands on the same
+    token and matching no longer hinges on a punctuation choice.
+    """
+    def repl(match: re.Match) -> str:
+        left, right = match.group(1), match.group(2)
+        if any(c.isdigit() for c in left) or any(c.isdigit() for c in right):
+            return left + right
+        return match.group(0)
+
+    return _HYPHEN_PAIR_RE.sub(repl, text)
+
+
 def normalize(text: str) -> str:
-    return " ".join(_WORD_RE.findall((text or "").lower()))
+    return " ".join(tokenize(text))
 
 
 def tokenize(text: str) -> list[str]:
-    return _WORD_RE.findall((text or "").lower())
+    lowered = _PLUS_RE.sub(" plus", (text or "").lower())
+    lowered = _APERTURE_RE.sub(r"f\1", lowered)
+    lowered = _GRADE_RE.sub(r"\1 \2", lowered)
+    return _WORD_RE.findall(_join_model_hyphens(lowered))
 
 
 # Common short-hands mapped to a canonical phrase so a "ps5" watch matches
@@ -170,6 +219,11 @@ DEFAULT_ALIASES = {
     "air pods": "airpods",
     "mac book": "macbook",
     "i phone": "iphone",
+    # Fragrance concentration long-forms fold to their codes so "Eau de Parfum"
+    # and "EDP" are one token (and distinct from EDT/EDC). Longest first.
+    "eau de parfum": "edp",
+    "eau de toilette": "edt",
+    "eau de cologne": "edc",
 }
 _ALIASES = dict(DEFAULT_ALIASES)
 
@@ -182,9 +236,15 @@ def register_aliases(pairs: Iterable[tuple[str, str]]) -> None:
             _ALIASES[v] = c
 
 
+# Ordinal suffixes: a human reads "AirPods Pro 2nd Gen" as the "2", so fold
+# "2nd"/"3rd"/"11th" down to the bare digit before any matching. Applied to both
+# query and title so a digit-form query pins an ordinal-form title and vice versa.
+_ORDINAL_RE = re.compile(r"\b(\d+)(?:st|nd|rd|th)\b")
+
+
 def canonicalize(text: str) -> str:
     """Normalise text and fold known short-hands to their canonical phrase."""
-    norm = " ".join(tokenize(text))
+    norm = _ORDINAL_RE.sub(r"\1", " ".join(tokenize(text)))
     for variant in sorted(_ALIASES, key=len, reverse=True):
         norm = re.sub(rf"\b{re.escape(variant)}\b", _ALIASES[variant], norm)
     return norm
@@ -234,6 +294,51 @@ def discriminators(text: str) -> set[str]:
     return out
 
 
+# Edition designators — a lone letter after "series"/"one" (Xbox Series X vs S,
+# Xbox One X vs S) or a generation after "mark"/"mk" (Canon R6 vs R6 Mark II).
+# These name *different products at different prices* but share every other word,
+# so neither coverage, fuzzy, nor semantics can tell them apart — they need an
+# exact guardrail. Unlike model-line qualifiers they are not priced as clusters,
+# so the check is symmetric: a watch and a listing must agree on the designator.
+_SERIES_DESIGNATOR_RE = re.compile(r"\b(?:series|one)\s+([a-z])\b")
+_MARK_DESIGNATOR_RE = re.compile(r"\b(?:mark|mk)\s*([0-9]+|[ivx]+)\b")
+_ROMAN = {
+    "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5",
+    "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+}
+
+
+def series_designators(text: str) -> set[str]:
+    """Lone model letters after "series"/"one" — the X/S in Xbox Series X/S."""
+    return {m.group(1) for m in _SERIES_DESIGNATOR_RE.finditer(text)}
+
+
+def mark_designators(text: str) -> set[str]:
+    """Generation markers after "mark"/"mk", with roman numerals folded to digits
+    so "Mark II" == "mk2" == "Mark 2"."""
+    return {_ROMAN.get(m.group(1), m.group(1)) for m in _MARK_DESIGNATOR_RE.finditer(text)}
+
+
+# Bare roman-numeral generations (Sony A7 III, Canon 5D IV) name a distinct,
+# differently-priced product. Restricted to unambiguous II-IX: lone "i"/"v"/"x"
+# are too noisy (and X is already the Xbox Series-letter), so they are excluded.
+_GEN_ROMAN = {"ii", "iii", "iv", "vi", "vii", "viii", "ix"}
+
+
+def generation_designators(text: str) -> set[str]:
+    """Standalone roman-numeral generation tokens, folded to digits ("iii" -> 3).
+
+    A roman that directly follows "mark"/"mk" belongs to :func:`mark_designators`
+    (so "Mark II" and "mk2" stay equivalent) and is not double-counted here.
+    """
+    tokens = text.split()
+    return {
+        _ROMAN[token]
+        for index, token in enumerate(tokens)
+        if token in _GEN_ROMAN and not (index and tokens[index - 1] in ("mark", "mk"))
+    }
+
+
 def _singular(token: str) -> str:
     return token[:-1] if token.endswith("s") and len(token) > 3 else token
 
@@ -272,6 +377,20 @@ def normalize_capacity(value: str) -> str | None:
     """Canonicalise a capacity string ("256 GB", "256GB") to "256gb"."""
     match = _CAPACITY_RE.search((value or "").lower())
     return f"{int(match.group(1))}{match.group(2)}" if match else None
+
+
+# Liquid volume — the size that defines a perfume or drink (100ml ≠ 60ml). "ml"
+# and "cl" precede bare "l" in the alternation so "100ml" isn't read as "100" "l".
+_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ml|cl|fl\s*oz|oz|l)\b")
+
+
+def volumes(text: str) -> set[str]:
+    """Liquid-volume tokens in ``text`` ("100ml", "2l"), normalised and despaced."""
+    out = set()
+    for match in _VOLUME_RE.finditer(text.lower()):
+        unit = match.group(2).replace(" ", "")
+        out.add(f"{match.group(1)}{unit}")
+    return out
 
 
 def specified_dimensions(query: str) -> set[str]:
@@ -326,8 +445,31 @@ def is_comparable(
 
     # 3) Identity discriminators (model numbers / salient digits) are pinned
     #    exactly — this is what keeps iPhone 13 ≠ 14 and PS4 ≠ PS5 even when the
-    #    fuzzy/semantic layers consider them similar.
-    if not discriminators(query) <= t_tokens:
+    #    fuzzy/semantic layers consider them similar. A mixed letter+digit model
+    #    code is matched tolerant of separators ("WH-1000XM5" ≡ "WH1000XM5") so a
+    #    hyphen/space difference doesn't drop a genuine comparable; bare numbers
+    #    ("13") stay an exact-token match so "13" never matches inside "2013".
+    t_joined = t_norm.replace(" ", "")
+    for disc in discriminators(query):
+        if disc in t_tokens:
+            continue
+        if len(disc) >= 4 and any(ch.isalpha() for ch in disc) and disc in t_joined:
+            continue
+        # A long reference number often gains a sub-variant suffix in the title
+        # (Rolex 116610 → 116610LN); accept it as a token prefix. Length ≥ 5 keeps
+        # this safe — "13" is never a prefix of a longer number like "2013".
+        if len(disc) >= 5 and any(token.startswith(disc) for token in t_tokens):
+            continue
+        return False
+
+    # 3b) Edition designators (Xbox Series X vs S, Canon R6 vs R6 Mark II) name
+    #     different products that share every other word, so query and title must
+    #     agree on them exactly — in both directions.
+    if series_designators(q_norm) != series_designators(t_norm):
+        return False
+    if mark_designators(q_norm) != mark_designators(t_norm):
+        return False
+    if generation_designators(q_norm) != generation_designators(t_norm):
         return False
 
     # 4) A model-line qualifier the query *names* is pinned exactly.
@@ -343,12 +485,23 @@ def is_comparable(
     if q_attrs["colours"] and not q_attrs["colours"] <= t_attrs["colours"]:  # type: ignore[operator]
         return False
 
+    # 5b) A liquid volume the query pins (perfume 100ml, drink 2l) must be present.
+    #     Only fires when the query names a volume, so non-volume watches are
+    #     untouched while a 60ml never prices against a 100ml market.
+    q_volumes = volumes(q_norm)
+    if q_volumes and not q_volumes <= volumes(t_norm):
+        return False
+
     # 6) Relevance: brand/key nouns present (coverage), OR a high fuzzy ratio
     #    (word order / typos), OR semantic similarity (reworded / cross-category).
     q_content = content_tokens(query)
     if not q_content:
         return True
-    if len(q_content & t_tokens) / len(q_content) >= coverage:
+    # Fold trivial plurals on both sides so "playstation 5 games" still covers a
+    # "PlayStation 5 Game" title (a human reads them as the same word).
+    q_stems = {_singular(token) for token in q_content}
+    t_stems = {_singular(token) for token in t_tokens}
+    if len(q_stems & t_stems) / len(q_stems) >= coverage:
         return True
     if fuzzy_threshold is not None and fuzzy_ratio(q_norm, t_norm) >= fuzzy_threshold:
         return True

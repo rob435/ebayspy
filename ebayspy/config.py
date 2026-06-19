@@ -160,6 +160,14 @@ class Config:
     market_vision_damage_threshold: float
     market_vision_count_hint: bool
     market_vision_count_threshold: float
+    # Preload the CLIP model in the background at startup (vs lazy on first deal).
+    market_vision_preload: bool
+    # Stock-image ↔ listing-photo comparison: compare each listing's photo to a
+    # per-watch reference image of the actual item; drop clear non-matches.
+    market_vision_reference: bool
+    market_vision_ref_threshold: float
+    market_vision_auto_reference: bool
+    market_vision_reference_sample: int
     # Feedback loop (👍/👎 on deals tunes the per-watch discount threshold).
     market_feedback_enabled: bool
     market_feedback_step: float
@@ -177,6 +185,7 @@ class Config:
     market_watches: tuple[str, ...]
     wake_ahead_hours: float
     wake_netwait_seconds: float
+    wake_arm_count: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -247,6 +256,11 @@ class Config:
             market_vision_damage_threshold=_float_env("MARKET_VISION_DAMAGE_THRESHOLD", 0.55),
             market_vision_count_hint=_bool_env("MARKET_VISION_COUNT_HINT", False),
             market_vision_count_threshold=_float_env("MARKET_VISION_COUNT_THRESHOLD", 0.55),
+            market_vision_preload=_bool_env("MARKET_VISION_PRELOAD", True),
+            market_vision_reference=_bool_env("MARKET_VISION_REFERENCE", True),
+            market_vision_ref_threshold=_float_env("MARKET_VISION_REF_THRESHOLD", 0.65),
+            market_vision_auto_reference=_bool_env("MARKET_VISION_AUTO_REFERENCE", True),
+            market_vision_reference_sample=_int_env("MARKET_VISION_REFERENCE_SAMPLE", 8),
             market_feedback_enabled=_bool_env("MARKET_FEEDBACK_ENABLED", True),
             market_feedback_step=_float_env("MARKET_FEEDBACK_STEP", 2.0),
             market_feedback_relax_step=_float_env("MARKET_FEEDBACK_RELAX_STEP", 1.0),
@@ -261,6 +275,7 @@ class Config:
             market_watches=tuple(_market_watches_env("MARKET_WATCHES")),
             wake_ahead_hours=_float_env("EBAYSPY_WAKE_HOURS", 6.0),
             wake_netwait_seconds=_float_env("EBAYSPY_WAKE_NETWAIT", 20.0),
+            wake_arm_count=max(1, _int_env("EBAYSPY_WAKE_ARM_COUNT", 2)),
         )
 
     def require_telegram(self) -> None:

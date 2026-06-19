@@ -16,7 +16,35 @@ from .models import Listing, MarketItem
 log = logging.getLogger(__name__)
 
 CommandHandler = Callable[[str, str | None, str, str], Awaitable[str]]
-CallbackHandlerType = Callable[[str, str | None, str], Awaitable[str]]
+# (chat_id, username, callback_data, message_id) -> toast text. message_id lets a
+# handler edit the message the button lives on (e.g. refresh a list after a tap).
+CallbackHandlerType = Callable[[str, str | None, str, int | None], Awaitable[str]]
+
+# Telegram hard limits: 4096 chars for a message, 1024 for a photo caption.
+MESSAGE_LIMIT = 4096
+CAPTION_LIMIT = 1024
+
+
+class TelegramError(RuntimeError):
+    """A Telegram API failure with the bot token scrubbed from its message."""
+
+
+def _truncate_html(text: str, limit: int) -> str:
+    """Clip ``text`` to Telegram's character limit without sending a broken alert.
+
+    Every line of an alert carries self-contained, balanced HTML, so the clip
+    prefers a line boundary; failing that it backs off any partial trailing tag.
+    Better a trimmed alert than a hard API rejection that drops it entirely.
+    """
+    if len(text) <= limit:
+        return text
+    clipped = text[: limit - 1]
+    newline = clipped.rfind("\n")
+    if newline > limit // 2:
+        clipped = clipped[:newline]
+    if clipped.rfind("<") > clipped.rfind(">"):  # don't end inside a tag
+        clipped = clipped[: clipped.rfind("<")]
+    return clipped.rstrip() + "…"
 
 EBAY_DOMAINS = {
     "EBAY-US": "ebay.com",
@@ -175,6 +203,24 @@ class TelegramBot:
     async def close(self) -> None:
         await self.client.aclose()
 
+    def _redact(self, text: str) -> str:
+        """Strip the bot token out of a string so it never reaches a log."""
+        return text.replace(self.token, "***") if self.token else text
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Call the Telegram API, raising a token-scrubbed error on failure.
+
+        httpx puts the full request URL — which embeds the bot token — into the
+        message of HTTP/connection errors, and those propagate up to log.exception
+        sites. Re-raise a sanitized error so the token is never written to a log.
+        """
+        try:
+            response = await self.client.request(method, f"{self.base_url}{path}", **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            raise TelegramError(self._redact(str(exc))) from None
+
     async def send_message(
         self,
         chat_id: str,
@@ -184,14 +230,35 @@ class TelegramBot:
     ) -> None:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text,
+            "text": _truncate_html(text, MESSAGE_LIMIT),
             "parse_mode": "HTML",
             "disable_web_page_preview": disable_preview,
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        response = await self.client.post(f"{self.base_url}/sendMessage", json=payload)
-        response.raise_for_status()
+        await self._request("POST", "/sendMessage", json=payload)
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        reply_markup: dict | None = None,
+        disable_preview: bool = True,
+    ) -> None:
+        """Replace a message's text (and inline keyboard) in place — used to
+        refresh a tappable list after a row is removed. Pass an empty
+        ``{"inline_keyboard": []}`` to clear the buttons when the list is empty."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": _truncate_html(text, MESSAGE_LIMIT),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": disable_preview,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await self._request("POST", "/editMessageText", json=payload)
 
     async def send_photo(
         self, chat_id: str, photo: str, caption: str, reply_markup: dict | None = None
@@ -199,13 +266,12 @@ class TelegramBot:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "photo": photo,
-            "caption": caption,
+            "caption": _truncate_html(caption, CAPTION_LIMIT),
             "parse_mode": "HTML",
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        response = await self.client.post(f"{self.base_url}/sendPhoto", json=payload)
-        response.raise_for_status()
+        await self._request("POST", "/sendPhoto", json=payload)
 
     async def _deliver(
         self,
@@ -222,7 +288,7 @@ class TelegramBot:
         a normal message; a failed photo send (dead image URL) also falls back so
         the alert always lands.
         """
-        if self.send_photos and image_url and len(text) <= 1024:
+        if self.send_photos and image_url and len(text) <= CAPTION_LIMIT:
             try:
                 await self.send_photo(chat_id, image_url, text, reply_markup)
                 return
@@ -493,8 +559,9 @@ class TelegramBot:
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         try:
-            await self.client.post(
-                f"{self.base_url}/answerCallbackQuery",
+            await self._request(
+                "POST",
+                "/answerCallbackQuery",
                 json={"callback_query_id": callback_id, "text": text},
             )
         except Exception:
@@ -513,8 +580,9 @@ class TelegramBot:
     async def _poll_once(
         self, handler: CommandHandler, callback_handler: CallbackHandlerType | None = None
     ) -> None:
-        response = await self.client.get(
-            f"{self.base_url}/getUpdates",
+        response = await self._request(
+            "GET",
+            "/getUpdates",
             params={
                 "offset": self.offset,
                 "timeout": 30,
@@ -522,7 +590,6 @@ class TelegramBot:
             },
             timeout=35,
         )
-        response.raise_for_status()
         payload = response.json()
         for update in payload.get("result", []):
             self.offset = max(self.offset, int(update["update_id"]) + 1)
@@ -550,9 +617,10 @@ class TelegramBot:
         message = callback.get("message") or {}
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id", ""))
+        message_id = message.get("message_id")
         username = (callback.get("from") or {}).get("username")
         if callback_handler is None or not chat_id or not data:
             await self.answer_callback(callback_id)
             return
-        toast = await callback_handler(chat_id, username, data)
+        toast = await callback_handler(chat_id, username, data, message_id)
         await self.answer_callback(callback_id, toast or "")

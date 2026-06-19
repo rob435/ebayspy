@@ -32,3 +32,18 @@ def test_new_seller_too_cheap_foreign_high_risk() -> None:
     assert score >= 80
     joined = " ".join(reasons).lower()
     assert "feedback" in joined and "below market" in joined and "ships from cn" in joined
+
+
+def test_all_red_flags_hit_the_suppression_ceiling() -> None:
+    # An all-red-flags listing must reach the 100 cap so it meets the default
+    # MARKET_RISK_MAX (100) and the service's ``>=`` suppression actually fires.
+    score, _ = assess(
+        _item(
+            total_price=100.0,  # ~29% of market
+            seller_feedback_score=1,
+            seller_feedback_percent=70.0,
+            item_location="CN",
+        ),
+        market_price=350.0, home_country="GB",
+    )
+    assert score == 100

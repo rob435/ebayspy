@@ -8,6 +8,7 @@ conversion between any two currencies goes via USD.
 from __future__ import annotations
 
 import logging
+import math
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +38,30 @@ class FxConverter:
         self._refreshed = False
 
     async def refresh(self, client) -> None:
-        """Best-effort live-rate refresh; silently keeps fallbacks on failure."""
+        """Best-effort live-rate refresh; silently keeps fallbacks on failure.
+
+        The payload is validated before it is adopted: each rate must be a finite
+        positive number in a sane range, and — since the endpoint quotes per-USD —
+        USD itself must read ~1. A malformed or differently-based payload is
+        rejected wholesale rather than corrupting every later conversion.
+        """
         try:
             response = await client.get(FX_URL, timeout=10)
             response.raise_for_status()
             rates = response.json().get("rates") or {}
-            self.rates.update({k: float(v) for k, v in rates.items() if v})
+            cleaned: dict[str, float] = {}
+            for code, value in rates.items():
+                try:
+                    rate = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(rate) and 0 < rate < 1e6:
+                    cleaned[str(code).upper()] = rate
+            usd = cleaned.get("USD")
+            if usd is None or not 0.98 <= usd <= 1.02:
+                log.debug("FX payload failed sanity check (USD=%s); keeping fallbacks", usd)
+                return
+            self.rates.update(cleaned)
             self._refreshed = True
         except Exception:
             log.debug("FX refresh failed; using fallback rates", exc_info=True)

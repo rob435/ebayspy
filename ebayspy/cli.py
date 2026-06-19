@@ -15,8 +15,11 @@ from .storage import (
     format_interval,
     format_market_rows,
     format_observed_rows,
+    format_price_floor,
+    format_seller_rows,
     format_status_rows,
     parse_interval,
+    parse_price_floor,
 )
 
 log = logging.getLogger("ebayspy.cli")
@@ -42,8 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     seller_sub = sellers.add_subparsers(dest="seller_command", required=True)
     add = seller_sub.add_parser("add", help="Add a seller")
     add.add_argument("username")
+    add.add_argument(
+        "--min", type=float, dest="min_price", help="Only alert on items at/above this price"
+    )
     remove = seller_sub.add_parser("remove", help="Remove a seller")
     remove.add_argument("username")
+    floor = seller_sub.add_parser("floor", help="Set/clear a seller's price floor")
+    floor.add_argument("username")
+    floor.add_argument(
+        "price", nargs="?", help="Minimum price, or 'none' to clear (default: clear)"
+    )
     seller_sub.add_parser("list", help="List sellers")
 
     observe = subparsers.add_parser("observe", help="Manage fast-poll observe-list sellers")
@@ -51,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     observe_add = observe_sub.add_parser("add", help="Add a seller to the observe list")
     observe_add.add_argument("username")
     observe_add.add_argument("interval", nargs="?", help="Optional interval, e.g. 90s, 3m, 1h")
+    observe_add.add_argument(
+        "--min", type=float, dest="min_price", help="Only alert on items at/above this price"
+    )
     observe_remove = observe_sub.add_parser("remove", help="Remove a seller from the observe list")
     observe_remove.add_argument("username")
     observe_sub.add_parser("list", help="List observe-list sellers")
@@ -79,7 +93,7 @@ async def _run_once(config: Config) -> None:
 
 
 async def _wakepoll(config: Config) -> None:
-    """One poll while held awake, then arm the next wake so a sleeping Mac
+    """One poll while held awake, then arm the next wakes so a sleeping Mac
     returns for the following slot. Run directly by the wakepoll LaunchAgent."""
     netwait = config.wake_netwait_seconds
     hours = config.wake_ahead_hours
@@ -93,9 +107,26 @@ async def _wakepoll(config: Config) -> None:
     try:
         if netwait > 0:
             await asyncio.sleep(netwait)  # let Wi-Fi reconnect after waking
-        await _run_once(config)
+        service = EbaySpyService(config)
+        try:
+            count = await service.check_once()
+            print(f"Check complete. Alerts sent: {count}")
+            # Always emit a heartbeat (when enabled) so a woken-from-sleep cycle
+            # still produces a guaranteed ~6-hourly status message even when no
+            # new listings or deals turned up. No-ops when nothing is due.
+            await service._maybe_send_heartbeat()
+        finally:
+            await service.close()
     finally:
-        when = wake.next_wake_time(datetime.now(), hours)
+        _arm_next_wakes(wake.next_wake_times(datetime.now(), hours, config.wake_arm_count))
+        if caffeinate is not None:
+            caffeinate.terminate()
+
+
+def _arm_next_wakes(whens: list[str]) -> None:
+    """Arm one pmset wake per grid slot in ``whens``; log and carry on if the
+    passwordless sudoers rule (scripts/enable-wake-sudo.sh) isn't installed."""
+    for when in whens:
         try:
             result = subprocess.run(
                 wake.arm_wake_argv(when), capture_output=True, text=True, timeout=30
@@ -104,13 +135,12 @@ async def _wakepoll(config: Config) -> None:
                 log.info("armed next wake: %s", when)
             else:
                 log.warning(
-                    "could not arm wake (%s); run once: sudo ./scripts/enable-wake-sudo.sh",
+                    "could not arm wake %s (%s); run once: sudo ./scripts/enable-wake-sudo.sh",
+                    when,
                     (result.stderr or "").strip() or f"exit {result.returncode}",
                 )
         except (OSError, subprocess.SubprocessError):
-            log.warning("could not arm next wake", exc_info=True)
-        if caffeinate is not None:
-            caffeinate.terminate()
+            log.warning("could not arm wake %s", when, exc_info=True)
 
 
 def main() -> None:
@@ -147,13 +177,28 @@ def main() -> None:
         store = Store(config.sqlite_path)
         try:
             if args.seller_command == "add":
-                store.add_seller(args.username)
-                print(f"Added seller: {args.username}")
+                min_price = args.min_price if args.min_price and args.min_price > 0 else None
+                store.add_seller(args.username, min_price)
+                floor = format_price_floor(min_price)
+                suffix = f" (alerting only on items {floor})" if floor else ""
+                print(f"Added seller: {args.username}{suffix}")
             elif args.seller_command == "remove":
                 print("Removed." if store.remove_seller(args.username) else "Seller was not found.")
+            elif args.seller_command == "floor":
+                floor_ok, floor = parse_price_floor(args.price)
+                if not floor_ok:
+                    print("Price floor must be a number, or 'none' to clear.")
+                elif not store.set_seller_min_price(args.username, floor):
+                    print(f"{args.username} is not on the watch list.")
+                else:
+                    tag = format_price_floor(floor)
+                    print(
+                        f"{args.username}: alerting on items {tag}."
+                        if tag
+                        else f"{args.username}: alerting on items at any price."
+                    )
             elif args.seller_command == "list":
-                sellers = store.list_sellers()
-                print("\n".join(sellers) if sellers else "No sellers configured.")
+                print(format_seller_rows(store.list_seller_rows()))
         finally:
             store.close()
     elif args.command == "observe":
@@ -161,15 +206,21 @@ def main() -> None:
         try:
             if args.observe_command == "add":
                 interval = parse_interval(args.interval) if args.interval else None
+                min_price = args.min_price if args.min_price and args.min_price > 0 else None
+                floor = format_price_floor(min_price)
+                suffix = f", alerting only on items {floor}" if floor else ""
                 if args.interval and interval is None:
                     print("Interval must look like 90s, 3m, or 1h.")
                 elif interval is not None:
                     interval = max(config.observe_min_interval_seconds, interval)
-                    store.add_observed_seller(args.username, interval)
-                    print(f"Observing seller: {args.username} every {format_interval(interval)}")
+                    store.add_observed_seller(args.username, interval, min_price)
+                    print(
+                        f"Observing seller: {args.username} "
+                        f"every {format_interval(interval)}{suffix}"
+                    )
                 else:
-                    store.add_observed_seller(args.username)
-                    print(f"Observing seller: {args.username}")
+                    store.add_observed_seller(args.username, None, min_price)
+                    print(f"Observing seller: {args.username}{suffix}")
             elif args.observe_command == "remove":
                 removed = store.remove_observed_seller(args.username)
                 print("Removed." if removed else "Seller was not on the observe list.")

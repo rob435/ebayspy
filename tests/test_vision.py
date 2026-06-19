@@ -28,6 +28,45 @@ def test_new_classifiers_return_none_when_disabled() -> None:
     assert vision.vision_flags("", "used") is None  # empty url too
 
 
+def test_reference_helpers_degrade_when_disabled() -> None:
+    vision.disable()
+    # Preload is a safe no-op when vision is off.
+    assert vision.preload() is False
+    # Image↔image match and reference picking both no-op without the model.
+    assert vision.image_match("https://example.test/a.jpg", "https://example.test/b.jpg") is None
+    assert vision.image_match("", "https://example.test/b.jpg") is None
+    assert vision.pick_reference([]) is None
+    assert vision.pick_reference(["https://example.test/a.jpg"]) is None
+
+
+def test_pick_reference_medoid_picks_the_central_image() -> None:
+    """The medoid (highest mean cosine to the rest) is chosen, so an odd-one-out
+    can't become the reference. Drives the selection with stubbed embeddings."""
+    import numpy as np
+
+    vectors = {
+        "a": np.array([1.0, 0.0, 0.0]),
+        "b": np.array([0.99, 0.14, 0.0]),  # nearly identical to a — the cluster centre
+        "c": np.array([0.97, 0.0, 0.24]),  # also near a
+        "odd": np.array([0.0, 0.0, 1.0]),  # the outlier
+    }
+
+    def fake_vector(url: str):
+        v = vectors[url]
+        return v / np.linalg.norm(v)
+
+    monkey = vision._safe_image_vector
+    loaded = vision._load
+    try:
+        vision._safe_image_vector = fake_vector  # type: ignore[assignment]
+        vision._load = lambda: True  # type: ignore[assignment]
+        assert vision.pick_reference(["a", "b", "c", "odd"]) in {"a", "b", "c"}
+        assert vision.pick_reference(["a", "b", "c", "odd"]) != "odd"
+    finally:
+        vision._safe_image_vector = monkey  # type: ignore[assignment]
+        vision._load = loaded  # type: ignore[assignment]
+
+
 def test_compose_note_combines_flags() -> None:
     flags = {
         "condition": ("used", 0.3),

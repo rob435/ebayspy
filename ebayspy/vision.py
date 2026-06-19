@@ -8,15 +8,34 @@ image:
     catch mistitled/misgraded gems — e.g. a listing tagged "for parts" whose
     photo clearly shows a pristine, boxed unit.
 
+With a *reference* stock image of the item it also does the most direct check of
+all — image↔image: does this listing's photo actually show the same product the
+reference does? (:func:`image_match`, :func:`pick_reference`.)
+
+Speed: every listing image is downloaded and embedded at most once — vectors are
+memoised by URL (:data:`_vector_cache`), so the per-deal text-match, vision flags
+and reference comparison all share a single embed, and a listing seen again on a
+later poll is free. Call :func:`preload` once at startup (off the event loop) so
+the model load/download never blocks the first deal check.
+
 Everything is best-effort: if fastembed/Pillow or the models are unavailable, the
 functions return None and the rest of the pipeline carries on without vision.
 """
 
 from __future__ import annotations
 
+import collections
+import io
 import logging
+from collections.abc import Sequence
 
 log = logging.getLogger(__name__)
+
+# Listing-image embeddings memoised by URL (L2-normalised vectors). Bounded LRU so
+# a long-running watcher can't grow it without limit; eBay image URLs are stable
+# per item, so a cache hit is always the right vector.
+_vector_cache: collections.OrderedDict[str, object] = collections.OrderedDict()
+_CACHE_CAP = 512
 
 TEXT_MODEL = "Qdrant/clip-ViT-B-32-text"
 IMAGE_MODEL = "Qdrant/clip-ViT-B-32-vision"
@@ -67,6 +86,14 @@ def disable() -> None:
     _disabled = True
 
 
+def preload() -> bool:
+    """Eagerly load the CLIP models + prompt vectors so the first deal check pays
+    no load/download cost inline. Call once at startup from a background thread
+    (e.g. ``asyncio.to_thread(vision.preload)``); it never raises and is a no-op
+    when vision is disabled or already loaded. Returns True when vision is ready."""
+    return _load()
+
+
 def _load() -> bool:
     global _text_model, _image_model, _client, _loaded
     global _condition_vectors, _stock_vectors, _damage_vectors, _count_vectors
@@ -112,15 +139,41 @@ def available() -> bool:
 
 
 def _image_vector(image_url: str):
+    """Download + embed (and L2-normalise) a listing image, memoised by URL.
+
+    Raises on a failed download/decode so callers can fall back; only successful
+    vectors are cached, so the same image is fetched and embedded at most once
+    across the text-match, vision flags and reference comparison — and across
+    polls."""
+    cached = _vector_cache.get(image_url)
+    if cached is not None:
+        _vector_cache.move_to_end(image_url)
+        return cached
     import numpy as np
 
     response = _client.get(image_url)  # type: ignore[union-attr]
     response.raise_for_status()
     from PIL import Image
 
-    image = Image.open(__import__("io").BytesIO(response.content)).convert("RGB")
+    image = Image.open(io.BytesIO(response.content)).convert("RGB")
     vec = next(iter(_image_model.embed([image])))  # type: ignore[union-attr]
-    return vec / (np.linalg.norm(vec) + 1e-9)
+    vec = vec / (np.linalg.norm(vec) + 1e-9)
+    _vector_cache[image_url] = vec
+    while len(_vector_cache) > _CACHE_CAP:
+        _vector_cache.popitem(last=False)
+    return vec
+
+
+def _safe_image_vector(image_url: str):
+    """:func:`_image_vector` that returns None instead of raising — for callers
+    embedding several images where one bad URL shouldn't sink the batch."""
+    if not image_url:
+        return None
+    try:
+        return _image_vector(image_url)
+    except Exception:
+        log.debug("Vision embed failed for %s", image_url, exc_info=True)
+        return None
 
 
 def match_score(image_url: str, query: str) -> float | None:
@@ -138,6 +191,47 @@ def match_score(image_url: str, query: str) -> float | None:
     except Exception:
         log.debug("Vision match failed for %s", image_url, exc_info=True)
         return None
+
+
+def image_match(reference_url: str, image_url: str) -> float | None:
+    """CLIP cosine similarity in [-1, 1] between a reference (stock) image of the
+    item and a listing photo — the most direct check there is that the listing
+    actually shows the same product. None when vision is unavailable or either
+    image can't be embedded. Both vectors are cached, so re-checking a listing or
+    reusing the reference across deals costs nothing."""
+    if not _load() or not reference_url or not image_url:
+        return None
+    reference_vec = _safe_image_vector(reference_url)
+    image_vec = _safe_image_vector(image_url)
+    if reference_vec is None or image_vec is None:
+        return None
+    return float(reference_vec @ image_vec)
+
+
+def pick_reference(image_urls: Sequence[str], *, sample: int = 8) -> str | None:
+    """Choose a representative 'stock' image for a product from a set of listing
+    photos: the medoid — the image most similar on average to all the others —
+    so an odd-one-out (wrong item, accessory-only, a lot photo) can't become the
+    reference. Embeds at most ``sample`` distinct URLs (cached). Returns the
+    chosen URL, or None if vision is unavailable or nothing embeds."""
+    if not _load():
+        return None
+    embedded: list[tuple[str, object]] = []
+    for url in list(dict.fromkeys(u for u in image_urls if u))[: max(sample, 0)]:
+        vec = _safe_image_vector(url)
+        if vec is not None:
+            embedded.append((url, vec))
+    if len(embedded) < 2:
+        return embedded[0][0] if embedded else None
+    import numpy as np
+
+    matrix = np.array([vec for _, vec in embedded])
+    # Vectors are L2-normalised, so the Gram matrix is pairwise cosine. Zero the
+    # diagonal and the medoid is the row with the highest similarity to the rest.
+    sims = matrix @ matrix.T
+    np.fill_diagonal(sims, 0.0)
+    best = int(np.argmax(sims.sum(axis=1)))
+    return embedded[best][0]
 
 
 def _classify_against(image_vec, vectors: dict[str, object]) -> tuple[str, float]:

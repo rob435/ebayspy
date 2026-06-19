@@ -213,6 +213,23 @@ def test_item_active_returns_false_on_not_found() -> None:
         asyncio.run(client.close())
 
 
+def test_item_ended_state_handles_naive_end_date() -> None:
+    # A timezone-naive itemEndDate must not raise TypeError (which would crash the
+    # poll loop) when compared against the aware "now".
+    client = _client()
+
+    async def fake_detail(item_id: str) -> dict:
+        return {"title": "x", "itemEndDate": "2020-01-01T00:00:00"}  # past, no Z
+
+    client._get_item_by_legacy_id = fake_detail
+    try:
+        active, end_date = asyncio.run(client.item_ended_state("123456789012"))
+        assert active is False  # the naive past date is read as ended, not a crash
+        assert end_date == "2020-01-01T00:00:00"
+    finally:
+        asyncio.run(client.close())
+
+
 def test_hydration_failure_keeps_search_listing() -> None:
     client = _client()
     found = Listing(

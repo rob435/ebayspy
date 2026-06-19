@@ -1,5 +1,44 @@
+import asyncio
+
 from ebayspy.fx import FxConverter
 from ebayspy.market import find_arbitrage
+
+
+class _FakeResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    async def get(self, url, timeout=None):
+        return _FakeResp(self._payload)
+
+
+def test_fx_refresh_adopts_sane_rates() -> None:
+    fx = FxConverter()
+    asyncio.run(fx.refresh(_FakeClient({"rates": {"USD": 1.0, "GBP": 0.5, "EUR": 0.9}})))
+    assert fx.rates["GBP"] == 0.5  # adopted live rate
+
+
+def test_fx_refresh_rejects_garbage_payload() -> None:
+    fx = FxConverter()
+    before = dict(fx.rates)
+    # Wrong base (USD != ~1), negatives, and non-numeric must all be rejected
+    # wholesale rather than corrupting later conversions.
+    asyncio.run(fx.refresh(_FakeClient({"rates": {"USD": 2.0, "GBP": -1, "EUR": "x"}})))
+    assert fx.rates == before
+    # A payload missing USD entirely is also rejected (can't trust the base).
+    asyncio.run(fx.refresh(_FakeClient({"rates": {"GBP": 0.79}})))
+    assert fx.rates == before
 
 
 def test_fx_convert_via_usd() -> None:
