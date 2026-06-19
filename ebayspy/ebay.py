@@ -237,6 +237,10 @@ class EbayClient:
             parsed = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
         except ValueError:
             return True, None
+        # eBay normally sends a Z-suffixed (aware) value, but coerce a naive one to
+        # UTC so the comparison never raises TypeError and crashes the poll loop.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
         if parsed > datetime.now(timezone.utc):
             return True, None
         return False, str(end_date)

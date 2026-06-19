@@ -54,6 +54,19 @@ class FakeTelegram:
         self.ended: list[tuple[str, str]] = []
         self.deals: list[tuple[str, str, float]] = []
         self.price_drops: list[tuple[str, str, float, float]] = []
+        self.messages: list[tuple[str, str, dict | None]] = []
+        self.edits: list[tuple[str, int, str, dict | None]] = []
+
+    async def send_message(
+        self, chat_id: str, text: str, disable_preview: bool = False, reply_markup=None
+    ) -> None:
+        self.messages.append((chat_id, text, reply_markup))
+
+    async def edit_message(
+        self, chat_id: str, message_id: int, text: str, reply_markup=None,
+        disable_preview: bool = True,
+    ) -> None:
+        self.edits.append((chat_id, message_id, text, reply_markup))
 
     async def notify_listing(self, chat_id: str, listing: Listing) -> None:
         self.listings.append((chat_id, listing.item_id))
@@ -194,6 +207,11 @@ def _service_config() -> SimpleNamespace:
         market_vision_damage_threshold=0.55,
         market_vision_count_hint=False,
         market_vision_count_threshold=0.55,
+        market_vision_preload=True,
+        market_vision_reference=True,
+        market_vision_ref_threshold=0.65,
+        market_vision_auto_reference=True,
+        market_vision_reference_sample=8,
         market_feedback_enabled=True,
         market_feedback_step=2.0,
         market_feedback_relax_step=1.0,
@@ -347,6 +365,45 @@ def test_check_once_alerts_new_listing(tmp_path: Path) -> None:
         assert count == 1
         assert service.telegram.listings == [("chat-1", "222222222222")]
         assert service.telegram.ended == []
+    finally:
+        store.close()
+
+
+def test_no_chat_configured_seeds_silently_without_flooding(tmp_path: Path) -> None:
+    # With no chat configured yet, new listings must be seeded as seen (not held
+    # unseen forever) so that adding a chat later doesn't flood the whole backlog.
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    service.configured_chats = lambda: []  # no chat yet
+    try:
+        store.add_seller("seller_one")
+        store.record_check("seller_one", listing_count=0, new_count=0)  # not a first scan
+
+        backlog = Listing(
+            item_id="222222222222", seller="seller_one", title="Pre-existing",
+            price="GBP 9.00", url="https://example.test/itm/222222222222",
+        )
+        service.ebay = FakeEbay([backlog])
+        count = asyncio.run(service.check_once())
+        assert count == 0  # nothing alerted with no chat
+        assert service.telegram.listings == []
+        assert store.is_seen("222222222222")  # but seeded so it won't re-fire
+
+        # A chat appears and a genuinely new listing arrives — only it alerts.
+        service.configured_chats = lambda: ["chat-1"]
+        fresh = Listing(
+            item_id="333333333333", seller="seller_one", title="Brand new",
+            price="GBP 12.00", url="https://example.test/itm/333333333333",
+        )
+        service.ebay = FakeEbay([fresh, backlog])
+        count = asyncio.run(service.check_once())
+        assert count == 1
+        assert service.telegram.listings == [("chat-1", "333333333333")]
     finally:
         store.close()
 
@@ -596,6 +653,86 @@ def test_observe_seller_records_error_without_raising(tmp_path: Path) -> None:
         store.close()
 
 
+def test_observe_seller_suppresses_items_below_price_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    cheap = Listing(
+        item_id="111111111111",
+        seller="seller_one",
+        title="Cheap junk",
+        price="GBP 9.00",
+        url="https://example.test/itm/111111111111",
+    )
+    pricey = Listing(
+        item_id="222222222222",
+        seller="seller_one",
+        title="Worth knowing about",
+        price="GBP 150.00",
+        url="https://example.test/itm/222222222222",
+    )
+    service = _observe_service(store, FakeEbay([pricey, cheap]))
+    try:
+        store.add_observed_seller("seller_one", None, min_price=100.0)
+        store.record_observe_check("seller_one", new_count=0)  # prior successful check
+
+        count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
+
+        assert count == 1
+        assert service.telegram.listings == [("chat-1", "222222222222")]
+        # The sub-floor item is never hydrated (saves an API call) but is marked
+        # seen so it isn't reconsidered every poll.
+        assert service.ebay.hydrated == ["222222222222"]
+        assert store.is_seen("111111111111")
+    finally:
+        store.close()
+
+
+def test_check_once_suppresses_new_listing_below_price_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one", min_price=100.0)
+        existing = Listing(
+            item_id="111111111111",
+            seller="seller_one",
+            title="Existing",
+            price="GBP 200.00",
+            url="https://example.test/itm/111111111111",
+        )
+        store.mark_seen(existing, notified=False)
+        store.upsert_active_listings([existing])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+
+        cheap = Listing(
+            item_id="333333333333",
+            seller="seller_one",
+            title="Cheap junk",
+            price="GBP 9.00",
+            url="https://example.test/itm/333333333333",
+        )
+        pricey = Listing(
+            item_id="222222222222",
+            seller="seller_one",
+            title="Worth it",
+            price="GBP 150.00",
+            url="https://example.test/itm/222222222222",
+        )
+        service.ebay = FakeEbay([pricey, cheap, existing])
+
+        count = asyncio.run(service.check_once())
+
+        assert count == 1
+        assert service.telegram.listings == [("chat-1", "222222222222")]
+        # Sub-floor item is still recorded so it won't be re-evaluated each poll.
+        assert store.is_seen("333333333333")
+    finally:
+        store.close()
+
+
 def test_observe_interval_for_applies_default_and_floor() -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
@@ -663,6 +800,27 @@ def test_check_market_watch_alerts_below_market(tmp_path: Path) -> None:
         # The same deal is not re-alerted on the next check.
         again = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
         assert again == 0
+    finally:
+        store.close()
+
+
+def test_market_watcher_survives_one_watch_failing(tmp_path: Path) -> None:
+    # A failure while checking one watch must not kill the whole market-watcher
+    # task (it is created once and never restarted) — otherwise a single bad deal
+    # would silently end ALL deal alerts. It should be logged and the loop go on.
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        store.add_market_watch("dyson airblade hu02")
+        service.configured_chats = lambda: ["chat-1"]
+
+        async def boom(row, chats):
+            service.stop_event.set()  # let the loop exit cleanly after this tick
+            raise RuntimeError("kaboom")
+
+        service._check_market_watch = boom
+        # Must return normally (exception swallowed), not propagate out of the task.
+        asyncio.run(service.run_market_watchers())
     finally:
         store.close()
 
@@ -1189,5 +1347,326 @@ def test_handle_command_health(tmp_path: Path) -> None:
         store.add_seller("seller_one")
         reply = asyncio.run(service.handle_command("chat-1", "user", "/health", ""))
         assert "uptime" in reply and "sellers" in reply
+    finally:
+        store.close()
+
+
+def _command_service(store: Store, ebay: FakeEbay) -> EbaySpyService:
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.ebay = ebay
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    return service
+
+
+def test_handle_command_add_with_price_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _command_service(store, FakeEbay([]))
+    try:
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/add", "lithosale [100]"))
+        assert "≥100" in reply
+        assert store.get_seller_min_price("lithosale") == 100.0
+
+        # Re-adding with a new floor retunes it in place instead of being rejected.
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/add", "lithosale [250]"))
+        assert "Updated" in reply and "≥250" in reply
+        assert store.get_seller_min_price("lithosale") == 250.0
+
+        # A bad floor token is rejected rather than silently dropped.
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/add", "other xyz"))
+        assert "number" in reply.lower()
+        assert not store.has_seller("other")
+    finally:
+        store.close()
+
+
+def test_handle_command_floor_sets_and_clears(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _command_service(store, FakeEbay([]))
+    try:
+        store.add_seller("lithosale")
+        store.add_observed_seller("lithosale")
+
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/floor", "lithosale [100]"))
+        assert "≥100" in reply and "watch and observe" in reply
+        assert store.get_seller_min_price("lithosale") == 100.0
+        assert store.get_observed_min_price("lithosale") == 100.0
+
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/floor", "lithosale none"))
+        assert "any price" in reply
+        assert store.get_seller_min_price("lithosale") is None
+        assert store.get_observed_min_price("lithosale") is None
+
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/floor", "ghost 50"))
+        assert "not on the watch or observe list" in reply
+    finally:
+        store.close()
+
+
+def test_handle_command_observe_with_interval_and_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _command_service(store, FakeEbay([]))
+    try:
+        reply = asyncio.run(
+            service.handle_command("chat-1", "user", "/observe", "techbargains 90s [100]")
+        )
+        assert "every 90s" in reply and "≥100" in reply
+        assert store.get_observed_min_price("techbargains") == 100.0
+        rows = store.list_observed_sellers()
+        assert rows[0]["interval_seconds"] == 90
+    finally:
+        store.close()
+
+
+def _heartbeat_service(store: Store) -> EbaySpyService:
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.heartbeat_enabled = True
+    config.heartbeat_interval_seconds = 18000
+    config.telegram_chat_id = "chat-1"
+    service.config = config
+    service.store = store
+    service.telegram = FakeTelegram()
+    service._started_at = datetime.now(timezone.utc)
+    return service
+
+
+def test_heartbeat_sends_when_quiet(tmp_path: Path) -> None:
+    # With nothing heard within the interval, a heartbeat goes out so a silent
+    # stall (or a sleeping Mac woken just to poll) still produces a 6-hourly ping.
+    store = Store(tmp_path / "test.sqlite3")
+    service = _heartbeat_service(store)
+    try:
+        asyncio.run(service._maybe_send_heartbeat())
+        assert service.telegram.messages, "expected a heartbeat to be sent"
+        assert "Heartbeat" in service.telegram.messages[0][1]
+        assert store.get_meta("last_heartbeat_at") is not None
+    finally:
+        store.close()
+
+
+def test_heartbeat_skips_when_recently_active(tmp_path: Path) -> None:
+    # A real alert within the interval already proves liveness — no heartbeat.
+    store = Store(tmp_path / "test.sqlite3")
+    service = _heartbeat_service(store)
+    try:
+        store.set_meta("last_alert_at", datetime.now(timezone.utc).isoformat())
+        asyncio.run(service._maybe_send_heartbeat())
+        assert not service.telegram.messages
+        assert store.get_meta("last_heartbeat_at") is None
+    finally:
+        store.close()
+
+
+def test_heartbeat_disabled_is_silent(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _heartbeat_service(store)
+    service.config.heartbeat_enabled = False
+    try:
+        asyncio.run(service._maybe_send_heartbeat())
+        assert not service.telegram.messages
+    finally:
+        store.close()
+
+
+def _management_service(store: Store) -> EbaySpyService:
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    return service
+
+
+def _callback_datas(markup: dict | None) -> set[str]:
+    if not markup:
+        return set()
+    return {b["callback_data"] for row in markup["inline_keyboard"] for b in row}
+
+
+def test_list_command_sends_one_remove_button_per_seller(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _management_service(store)
+    try:
+        store.add_seller("lithosale")
+        store.add_seller("chfle-6052")
+        reply = asyncio.run(service.handle_command("chat-1", "user", "/list", ""))
+        # Sent directly with buttons, so the plain-text reply path stays empty.
+        assert reply == ""
+        assert len(service.telegram.messages) == 1
+        _chat, _text, markup = service.telegram.messages[0]
+        assert _callback_datas(markup) == {"rs:lithosale", "rs:chfle-6052"}
+    finally:
+        store.close()
+
+
+def test_watches_and_observing_commands_send_remove_buttons(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _management_service(store)
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        store.add_observed_seller("lithosale")
+
+        asyncio.run(service.handle_command("chat-1", "user", "/watches", ""))
+        asyncio.run(service.handle_command("chat-1", "user", "/observing", ""))
+
+        watches_markup = service.telegram.messages[0][2]
+        observing_markup = service.telegram.messages[1][2]
+        assert _callback_datas(watches_markup) == {f"uw:{watch_id}"}
+        assert _callback_datas(observing_markup) == {"ro:lithosale"}
+    finally:
+        store.close()
+
+
+def test_remove_button_tap_removes_seller_and_refreshes_in_place(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _management_service(store)
+    try:
+        store.add_seller("lithosale")
+        store.add_seller("chfle-6052")
+
+        toast = asyncio.run(service.handle_callback("chat-1", "user", "rs:lithosale", 42))
+
+        assert "Removed lithosale" in toast
+        assert [r["username"] for r in store.list_seller_rows()] == ["chfle-6052"]
+        # The message is edited in place to drop the removed row's button.
+        assert service.telegram.edits, "expected the list to refresh after removal"
+        _chat, message_id, _text, markup = service.telegram.edits[-1]
+        assert message_id == 42
+        assert _callback_datas(markup) == {"rs:chfle-6052"}
+    finally:
+        store.close()
+
+
+def test_last_removal_clears_the_keyboard(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _management_service(store)
+    try:
+        store.add_seller("lithosale")
+        asyncio.run(service.handle_callback("chat-1", "user", "rs:lithosale", 1))
+        assert store.list_seller_rows() == []
+        _chat, _mid, _text, markup = service.telegram.edits[-1]
+        assert markup == {"inline_keyboard": []}  # buttons cleared when empty
+    finally:
+        store.close()
+
+
+def test_unwatch_and_unobserve_button_taps_remove_rows(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _management_service(store)
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        store.add_observed_seller("lithosale")
+
+        watch_toast = asyncio.run(
+            service.handle_callback("chat-1", "user", f"uw:{watch_id}", 7)
+        )
+        observe_toast = asyncio.run(
+            service.handle_callback("chat-1", "user", "ro:lithosale", 8)
+        )
+
+        assert "Stopped watching" in watch_toast
+        assert "Stopped observing lithosale" in observe_toast
+        assert store.list_market_watches() == []
+        assert store.list_observed_sellers() == []
+    finally:
+        store.close()
+
+
+def test_remove_button_callback_data_skipped_when_too_long() -> None:
+    # An eBay username long enough to push callback_data past 64 bytes gets no
+    # button (it would make Telegram reject the whole message); text still lists it.
+    assert EbaySpyService._remove_button("x", "rs:" + "a" * 62) is None
+    assert EbaySpyService._remove_button("x", "rs:lithosale") is not None
+
+
+def _vision_service(**overrides) -> EbaySpyService:
+    service = object.__new__(EbaySpyService)
+    config = _service_config()
+    config.market_vision = True
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    service.config = config
+    return service
+
+
+def _vision_item() -> MarketItem:
+    return MarketItem(
+        item_id="1", title="iPhone 13", url="https://ebay/1", seller="s",
+        currency="GBP", item_price=400.0, total_price=400.0,
+        image_url="https://img.test/listing.jpg",
+    )
+
+
+def test_vision_check_drops_when_photo_differs_from_reference(monkeypatch) -> None:
+    from ebayspy import service as service_mod
+
+    service = _vision_service(market_vision_ref_threshold=0.65)
+    monkeypatch.setattr(service_mod.vision, "available", lambda: True)
+    monkeypatch.setattr(service_mod.vision, "match_score", lambda url, q: 0.5)
+    monkeypatch.setattr(service_mod.vision, "vision_flags", lambda url, cond: None)
+    # Listing photo looks nothing like the reference stock image -> dropped.
+    monkeypatch.setattr(service_mod.vision, "image_match", lambda ref, url: 0.40)
+    drop, note = asyncio.run(
+        service._vision_check(_vision_item(), "iphone 13", "https://img.test/stock.jpg")
+    )
+    assert drop is True and note == ""
+
+
+def test_vision_check_keeps_and_notes_a_matching_reference(monkeypatch) -> None:
+    from ebayspy import service as service_mod
+
+    service = _vision_service(market_vision_ref_threshold=0.65)
+    monkeypatch.setattr(service_mod.vision, "available", lambda: True)
+    monkeypatch.setattr(service_mod.vision, "match_score", lambda url, q: 0.5)
+    monkeypatch.setattr(service_mod.vision, "vision_flags", lambda url, cond: None)
+    monkeypatch.setattr(service_mod.vision, "image_match", lambda ref, url: 0.88)
+    drop, note = asyncio.run(
+        service._vision_check(_vision_item(), "iphone 13", "https://img.test/stock.jpg")
+    )
+    assert drop is False and "Matches the item" in note and "88%" in note
+
+
+def test_vision_check_without_reference_skips_image_match(monkeypatch) -> None:
+    from ebayspy import service as service_mod
+
+    service = _vision_service()
+    monkeypatch.setattr(service_mod.vision, "available", lambda: True)
+    monkeypatch.setattr(service_mod.vision, "match_score", lambda url, q: 0.5)
+    monkeypatch.setattr(service_mod.vision, "vision_flags", lambda url, cond: None)
+
+    def _boom(ref, url):  # must not be called without a reference
+        raise AssertionError("image_match should not run without a reference")
+
+    monkeypatch.setattr(service_mod.vision, "image_match", _boom)
+    drop, note = asyncio.run(service._vision_check(_vision_item(), "iphone 13", None))
+    assert drop is False and "Matches the item" not in note
+
+
+def test_handle_refimage_set_show_clear(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _vision_service()
+    service.store = store
+    try:
+        watch_id = store.add_market_watch("iPhone 13 Pro", condition="used")
+        # Show before pinning -> auto message.
+        assert "auto-deriving" in service._handle_refimage(str(watch_id))
+        # Pin a URL.
+        reply = service._handle_refimage(f"{watch_id} https://img.test/stock.jpg")
+        assert "Pinned" in reply
+        assert store.get_market_watch(watch_id)["reference_image_url"] == (
+            "https://img.test/stock.jpg"
+        )
+        # Show after pinning -> echoes the URL.
+        assert "https://img.test/stock.jpg" in service._handle_refimage(str(watch_id))
+        # Clear -> back to auto.
+        assert "back to auto" in service._handle_refimage(f"{watch_id} clear")
+        assert store.get_market_watch(watch_id)["reference_image_url"] is None
+        # Bad inputs.
+        assert "Usage" in service._handle_refimage("")
+        assert "No market watch" in service._handle_refimage("9999 https://img.test/x.jpg")
+        assert "image URL" in service._handle_refimage(f"{watch_id} not-a-url")
     finally:
         store.close()

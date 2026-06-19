@@ -26,8 +26,15 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
     sample to genuinely comparable listings with a **layered hybrid** engine:
     - **Guardrail rules** (always enforced): identity discriminators — model numbers and
       salient digits (`hu02`, and the `13` in *iPhone 13*) are pinned exactly, so iPhone 13 ≠
-      14 and PS4 ≠ PS5; accessory / parts / lot / damage vocabulary is rejected; pinned
-      attributes (capacity/colour/model-line) must match.
+      14 and PS4 ≠ PS5; edition designators are pinned in both directions, so Xbox Series X ≠
+      Series S, Canon R6 ≠ R6 Mark II, and Sony A7 III ≠ A7 II; accessory / parts / lot /
+      damage vocabulary is rejected; pinned attributes (capacity/colour/model-line) must
+      match. Written-form quirks are read the way a human would — `WH-1000XM5` ≡ `WH1000XM5`,
+      `S21+` ≡ `S21 Plus`, `AirPods Pro 2nd Gen` ≡ `2` — so a punctuation choice never drops
+      a genuine comparable. Niche identity also pins when you name it: a graded-card grade
+      (`PSA 10` ≠ `PSA 9`), a fragrance concentration (`EDP` ≠ `EDT`), a liquid volume
+      (`100ml` ≠ `60ml`), a watch reference (`116610` ≡ `116610LN`) and a lens aperture
+      (`f/1.8` ≡ `f1.8`).
     - **Relevance** then passes on any of token coverage, **fuzzy ratio** (word order / typos,
       via rapidfuzz), or **semantic similarity** (static embeddings — install the `nlp` extra),
       so the same product described in very different words matches, across *any* category.
@@ -78,7 +85,15 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
     "**deal if you offer ≈ £X**" alert that never claims the list price is the deal.
   - **Vision flags** (optional, `MARKET_VISION=true` + the `vision` extra). Beyond verifying
     the photo matches the product, flags a **stock photo on a used listing** (dropship/scam
-    tell), **possible damage**, and a **multiple-items** lot hint.
+    tell), **possible damage**, and a **multiple-items** lot hint. The CLIP model is
+    **preloaded** in the background at startup and every image is **downloaded + embedded once**
+    (cached by URL), so checks are cheap and never block.
+  - **Stock-image match** (`MARKET_VISION_REFERENCE=true`). Compares each listing's photo
+    **image-to-image** against a reference "stock" image of the actual item — the most direct
+    "is this really the product?" test — and **drops listings that clearly show something else**.
+    The reference is auto-derived from the market (the medoid, the most representative photo
+    across comparable listings); pin the exact one per watch with `/refimage <id> <image-url>`
+    (clear with `/refimage <id> clear`). Matching deals carry a **📷 Matches the item (NN%)** read.
   - **Sharper sourcing.** Surfaces **no-bid / low-competition auctions** at a relaxed
     threshold (win uncontested); flags **scam/risk** (new seller, price too-good, foreign
     location) and can suppress the worst; spots **lot/bundle arbitrage** (`/watch … lots:on`)
@@ -107,23 +122,37 @@ Track specific eBay sellers from a VPS and receive Telegram notifications when t
     genuinely new listings, so a tight cadence stays affordable.
   - The observe lane alerts on new listings only (no ended/restock alerts) and runs
     alongside the regular watch list.
+- Optional **per-seller price floor** to mute a seller who spams cheap junk:
+  - Add it in brackets when you watch or observe a seller — `/add lithosale [100]` or
+    `/observe lithosale 90s [100]` — and only items priced **at or above** that figure
+    alert (new, price-drop, ended/restock for the watch list; new listings for observe).
+  - No floor means **any price** alerts, so existing sellers are unaffected.
+  - The floor is currency-agnostic (it compares the listing's numeric amount) and fails
+    open: if a price can't be parsed, the item still alerts.
 - Lets you manage sellers from Telegram:
-  - `/add sellername`
+  - `/add sellername [minprice]` — e.g. `/add acme` or `/add lithosale [100]`
   - `/remove sellername`
-  - `/list`
+  - `/list` — sellers with their price floor, if any
+  - `/floor sellername [100]` — set/retune a floor later (use `none` to clear); applies to
+    the seller's watch and/or observe entry without losing its seen baseline
   - `/status`
   - `/health` — liveness: uptime, time since last poll, seller/watch counts, errors
   - `/check`
-  - `/observe sellername [interval]` — start fast new-listing alerts (e.g. `/observe acme 90s`)
+  - `/observe sellername [interval] [minprice]` — start fast new-listing alerts
+    (e.g. `/observe acme 90s` or `/observe acme 90s [100]`)
   - `/unobserve sellername`
-  - `/observing` — show the observe list, intervals, and last check
+  - `/observing` — show the observe list, intervals, floors, and last check
   - `/interval sellername <time>` — change a seller's observe interval (e.g. `5m`, `1h`)
   - `/watch <terms> [condition:new|used] [under:PRICE] [discount:%] [every:TIME] [exclude:word] [category:ID] [auctions:on] [markets:GB,DE,US]` —
     snipe below-market deals (e.g. `/watch dyson airblade hu02 condition:new under:400 discount:20`)
   - `/unwatch <id>` — stop a market watch (ids shown by `/watches`)
   - `/watches` — list market watches with market estimate, variant, price trend, and last check
   - `/demand <id>` — the demand/liquidity read for a watch
+  - `/refimage <id> <image-url>` — pin the reference "stock" photo a watch matches listings
+    against (`/refimage <id>` shows it, `/refimage <id> clear` reverts to auto)
   - `/help`
+  - **Tap to remove:** `/list`, `/observing` and `/watches` each render a 🗑 button per row —
+    tap it to drop that seller/watch without retyping its name or id; the list refreshes in place.
 - Lets configured admins manage invite-only access from Telegram:
   - `/invite @username`
   - `/uninvite @username`
@@ -172,6 +201,8 @@ Manage sellers locally:
 
 ```powershell
 ebayspy sellers add sellername
+ebayspy sellers add sellername --min 100   # only alert on items at/above £100
+ebayspy sellers floor sellername 100       # set/retune a floor later (use 'none' to clear)
 ebayspy sellers list
 ebayspy sellers remove sellername
 ```
@@ -180,6 +211,7 @@ Manage the fast-poll observe list locally:
 
 ```powershell
 ebayspy observe add sellername 3m
+ebayspy observe add sellername 3m --min 100
 ebayspy observe list
 ebayspy observe remove sellername
 ```
@@ -197,6 +229,31 @@ Check service health:
 ```powershell
 ebayspy status
 ```
+
+## macOS (local) notes
+
+To run ebayspy on a Mac that sleeps, install two LaunchAgents:
+
+```bash
+scripts/install-launchd.sh      # com.ebayspy.tracker  — always-on while awake
+scripts/install-wakepoll.sh     # com.ebayspy.wakepoll — wakes a sleeping Mac to poll
+sudo scripts/enable-wake-sudo.sh  # one-off: lets the agent arm wakes (pmset) without a password
+```
+
+- **Tracker** (`com.ebayspy.tracker`, `ebayspy run`) handles Telegram commands and the
+  observe/market fast lanes in real time — but only while the Mac is awake.
+- **Wake-poll** (`com.ebayspy.wakepoll`, `ebayspy wakepoll`) runs on a 6-hour calendar
+  schedule (00/06/12/18). Each run polls once, sends a heartbeat (if enabled), then arms
+  the next wake(s) via `pmset`. The wakes are aligned to the same grid (`EBAYSPY_WAKE_HOURS`,
+  `EBAYSPY_WAKE_ARM_COUNT`) so a sleeping Mac comes back up for each slot; arming the next
+  two slots lets the schedule self-heal if one run is missed.
+- **Heartbeat** (`HEARTBEAT_ENABLED=true`): a periodic "still alive" ping (uptime + health)
+  sent when no real alert went out within `HEARTBEAT_INTERVAL_SECONDS`. It fires from both the
+  tracker and the wake-poll cycle, so you get a confirmation roughly every wake even with no
+  new deals. Set the interval just under `EBAYSPY_WAKE_HOURS` (e.g. `18000` for a 6h wake).
+
+> Scheduled wake-from-sleep is most reliable with the Mac **on power**; on battery with the
+> lid closed, macOS may not honour every wake. For 24/7 reliability, run on a VPS instead.
 
 ## VPS notes
 

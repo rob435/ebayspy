@@ -10,13 +10,18 @@ from ebayspy.storage import (
     format_interval,
     format_market_rows,
     format_observed_rows,
+    format_price_floor,
+    format_seller_rows,
     format_status_rows,
     is_valid_ebay_username,
     is_valid_telegram_username,
+    looks_like_floor,
     normalize_ebay_username,
     normalize_market_query,
     normalize_telegram_username,
     parse_interval,
+    parse_price_floor,
+    passes_min_price,
 )
 
 
@@ -60,6 +65,105 @@ def test_store_sellers_seen_items_and_status(tmp_path: Path) -> None:
         status = format_status_rows(store.status_rows())
 
         assert "seller_one: ok, 3 active, 1 new, 0 ended" in status
+    finally:
+        store.close()
+
+
+def test_parse_price_floor_accepts_brackets_symbols_and_clear_words() -> None:
+    assert parse_price_floor("[100]") == (True, 100.0)
+    assert parse_price_floor("100") == (True, 100.0)
+    assert parse_price_floor("£1,299.99") == (True, 1299.99)
+    assert parse_price_floor("min:50") == (True, 50.0)
+    # Empty, zero, and clear-words all mean "no floor".
+    assert parse_price_floor("") == (True, None)
+    assert parse_price_floor("0") == (True, None)
+    assert parse_price_floor("none") == (True, None)
+    # Garbage is rejected so the caller can surface an error.
+    assert parse_price_floor("abc") == (False, None)
+
+
+def test_passes_min_price_fails_open() -> None:
+    assert passes_min_price("9.00 GBP", 100) is False
+    assert passes_min_price("150.00 GBP", 100) is True
+    assert passes_min_price("GBP 100.00", 100) is True  # boundary is inclusive
+    # No floor, or an unparseable price, never suppresses.
+    assert passes_min_price("9.00 GBP", None) is True
+    assert passes_min_price("Unknown", 100) is True
+
+
+def test_looks_like_floor_distinguishes_floors_from_intervals() -> None:
+    assert looks_like_floor("[100]")
+    assert looks_like_floor("£5")
+    assert looks_like_floor("min:50")
+    assert not looks_like_floor("90s")
+    assert not looks_like_floor("100")  # bare number reads as an interval
+
+
+def test_format_price_floor_renders_compact_tag() -> None:
+    assert format_price_floor(100) == "≥100"
+    assert format_price_floor(99.5) == "≥99.5"
+    assert format_price_floor(None) == ""
+
+
+def test_seller_min_price_persists_and_updates(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        store.add_seller("lithosale", min_price=100.0)
+        assert store.get_seller_min_price("LITHOSALE") == 100.0
+
+        assert store.set_seller_min_price("lithosale", 200.0)
+        assert store.get_seller_min_price("lithosale") == 200.0
+
+        # Clearing the floor sets it back to "any price".
+        assert store.set_seller_min_price("lithosale", None)
+        assert store.get_seller_min_price("lithosale") is None
+
+        # A seller added without a floor has none.
+        store.add_seller("anyprice")
+        assert store.get_seller_min_price("anyprice") is None
+
+        rows = {row["username"]: row["min_price"] for row in store.list_seller_rows()}
+        assert rows == {"lithosale": None, "anyprice": None}
+    finally:
+        store.close()
+
+
+def test_rename_seller_carries_price_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        store.add_seller("old_name", min_price=150.0)
+        assert store.rename_seller("old_name", "new_name")
+        assert store.list_sellers() == ["new_name"]
+        assert store.get_seller_min_price("new_name") == 150.0
+    finally:
+        store.close()
+
+
+def test_observed_seller_min_price_persists(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        store.add_observed_seller("lithosale", 90, min_price=100.0)
+        assert store.get_observed_min_price("lithosale") == 100.0
+        assert store.set_observed_min_price("lithosale", 250.0)
+        assert store.get_observed_min_price("lithosale") == 250.0
+
+        observed = format_observed_rows(
+            store.list_observed_sellers(), default_interval_seconds=180
+        )
+        assert "lithosale: every" in observed
+        assert "(min 250)" in observed
+    finally:
+        store.close()
+
+
+def test_format_seller_rows_shows_floor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        store.add_seller("cheap_ok")
+        store.add_seller("pricey", min_price=100.0)
+        rendered = format_seller_rows(store.list_seller_rows())
+        assert "cheap_ok" in rendered
+        assert "pricey (min 100)" in rendered
     finally:
         store.close()
 
@@ -324,6 +428,27 @@ def test_market_watch_crud_and_dedupe(tmp_path: Path) -> None:
         assert store.remove_market_watch(watch_id) is True
         assert store.get_market_watch(watch_id) is None
         assert store.has_market_watch("Dyson Airblade HU02", condition="new") is False
+    finally:
+        store.close()
+
+
+def test_market_reference_image_set_clear(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    try:
+        watch_id = store.add_market_watch("iPhone 13 Pro", condition="used")
+        # Fresh watches have no reference image.
+        assert store.get_market_watch(watch_id)["reference_image_url"] is None
+        store.set_market_reference_image(watch_id, "https://img.test/stock.jpg")
+        assert (
+            store.get_market_watch(watch_id)["reference_image_url"]
+            == "https://img.test/stock.jpg"
+        )
+        # Clearing (empty or None) drops back to auto.
+        store.set_market_reference_image(watch_id, None)
+        assert store.get_market_watch(watch_id)["reference_image_url"] is None
+        store.set_market_reference_image(watch_id, "https://img.test/x.jpg")
+        store.set_market_reference_image(watch_id, "")
+        assert store.get_market_watch(watch_id)["reference_image_url"] is None
     finally:
         store.close()
 

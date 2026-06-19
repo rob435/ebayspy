@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import signal
 from datetime import datetime, timezone
@@ -44,17 +45,27 @@ from .storage import (
     format_interval,
     format_market_rows,
     format_observed_rows,
+    format_price_floor,
+    format_seller_rows,
     format_status_rows,
     is_valid_ebay_username,
     is_valid_telegram_username,
+    looks_like_floor,
     normalize_ebay_username,
     normalize_market_query,
     normalize_telegram_username,
     parse_interval,
+    parse_price_floor,
+    passes_min_price,
 )
 from .telegram import TelegramBot
 
 log = logging.getLogger(__name__)
+
+# A tappable list (/watches, /list, /observing) renders one 🗑 remove button per
+# row. Cap how many buttons ride along so a huge list can't blow past Telegram's
+# inline-keyboard limits; the message text still lists every entry.
+_MAX_TABLE_BUTTONS = 50
 
 
 class _Deal(NamedTuple):
@@ -159,6 +170,12 @@ class EbaySpyService:
         self.seed_market_watches()
         await self.fx.refresh(self.ebay.client)
         loop = asyncio.get_running_loop()
+        # Warm the CLIP model off the event loop so the first deal check (and the
+        # /help command, which froze on the inline model download before) never
+        # blocks on the load. Fire-and-forget: failure just leaves vision lazy.
+        # Held on self so the task isn't garbage-collected mid-load.
+        if self.config.market_vision and self.config.market_vision_preload:
+            self._preload_task = asyncio.create_task(self._preload_vision())
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, self.stop_event.set)
@@ -276,6 +293,9 @@ class EbaySpyService:
             if current_seller:
                 seller = current_seller
 
+            # Items below the seller's price floor never alert (new, restock, drop
+            # or ended) — that's how a spammy seller's cheap junk is filtered out.
+            min_price = self.store.get_seller_min_price(seller)
             first_scan = not self.store.seller_has_successful_check(seller)
             notify_existing = self.config.notify_existing_on_first_run or not first_scan
             active_item_ids = {listing.item_id for listing in listings}
@@ -283,7 +303,8 @@ class EbaySpyService:
             for listing in reversed(listings):
                 if self.store.is_seen(listing.item_id):
                     continue
-                if notify_existing:
+                notified = False
+                if notify_existing and chats and passes_min_price(listing.price, min_price):
                     sent = await self._notify_chats(chats, listing)
                     if not sent:
                         # Every chat send failed (e.g. Telegram outage); leave the
@@ -292,12 +313,17 @@ class EbaySpyService:
                         continue
                     seller_new_count += 1
                     total_alert_count += 1
-                self.store.mark_seen(listing, notified=notify_existing)
+                    notified = True
+                # With no chat configured yet, seed silently so a chat added later
+                # starts fresh rather than being flooded with the whole backlog.
+                self.store.mark_seen(listing, notified=notified)
 
             if not first_scan:
                 for listing, previous_quantity, current_quantity in (
                     self.store.quantity_increase_candidates(listings)
                 ):
+                    if not passes_min_price(listing.price, min_price):
+                        continue
                     sent = await self._notify_quantity_increase_chats(
                         chats, listing, previous_quantity, current_quantity
                     )
@@ -310,6 +336,10 @@ class EbaySpyService:
                 for listing, old_price, new_price, pct in self.store.price_drop_candidates(
                     listings, self.config.seller_price_drop_percent
                 ):
+                    # Compare the post-drop price against the floor: a drop that lands
+                    # below the threshold is still junk we don't want to hear about.
+                    if min_price and new_price < min_price:
+                        continue
                     sent = await self._notify_price_drop_chats(
                         chats, listing, old_price, new_price, pct
                     )
@@ -321,6 +351,8 @@ class EbaySpyService:
                     for listing, last_seen_at in self.store.ended_candidates(
                         seller, active_item_ids
                     ):
+                        if not passes_min_price(listing.price, min_price):
+                            continue
                         active, ended_at = await self.ebay.item_ended_state(listing.item_id)
                         if active is True:
                             log.info(
@@ -424,6 +456,7 @@ class EbaySpyService:
             self.store.record_observe_check(seller, new_count=0, error=str(exc))
             return 0
 
+        min_price = self.store.get_observed_min_price(seller)
         first_observe = not self.store.observed_seller_has_successful_check(seller)
         new_listings = [
             listing for listing in reversed(listings) if not self.store.is_seen(listing.item_id)
@@ -434,7 +467,15 @@ class EbaySpyService:
             for listing in new_listings:
                 self.store.mark_seen(listing, notified=False)
         elif new_listings:
-            for listing in await self.ebay.hydrate_listings(new_listings):
+            # Drop sub-floor items here (the search summary already carries a price),
+            # so we never spend a per-item hydrate call on junk we won't alert on.
+            for listing in new_listings:
+                if not passes_min_price(listing.price, min_price):
+                    self.store.mark_seen(listing, notified=False)
+            to_alert = [
+                listing for listing in new_listings if passes_min_price(listing.price, min_price)
+            ]
+            for listing in await self.ebay.hydrate_listings(to_alert):
                 sent = await self._notify_chats(chats, listing)
                 self.store.mark_seen(listing, notified=sent)
                 if sent:
@@ -479,8 +520,14 @@ class EbaySpyService:
                     if loop.time() >= due_at:
                         watch_chats = self._chats_for_watch(row, broadcast)
                         if watch_chats:
-                            await self._check_market_watch(row, watch_chats)
-                            await self._maybe_check_arbitrage(row, watch_chats, loop.time())
+                            # Isolate each watch: an unexpected failure in one must
+                            # not kill the whole market-watcher task (it is never
+                            # restarted), which would silently end all deal alerts.
+                            try:
+                                await self._check_market_watch(row, watch_chats)
+                                await self._maybe_check_arbitrage(row, watch_chats, loop.time())
+                            except Exception:
+                                log.exception("Market watch %s failed", watch_id)
                         # A watch with an auction near its end polls on the tight
                         # turbo cadence so the final-call snipe alert lands in time.
                         interval = self._auction_turbo.get(watch_id) or self._market_interval_for(row)
@@ -660,19 +707,36 @@ class EbaySpyService:
     def _semantic_threshold(self) -> float | None:
         return self.config.market_semantic_threshold if self.config.market_semantic else None
 
-    async def _vision_check(self, item: MarketItem, query: str) -> tuple[bool, str]:
+    async def _preload_vision(self) -> None:
+        """Background warm-up of the CLIP model so the first deal check is instant."""
+        if await asyncio.to_thread(vision.preload):
+            log.info("Vision model preloaded")
+
+    async def _vision_check(
+        self, item: MarketItem, query: str, reference_url: str | None = None
+    ) -> tuple[bool, str]:
         """Optionally verify the listing photo. Returns (drop, note): drop=True when
         the image clearly isn't the product; note is a one-line image read (incl. a
-        gem flag when the photo looks better than the listing's stated condition).
+        gem flag when the photo looks better than the listing's stated condition,
+        and a stock-image match read when the watch has a reference image).
         Runs the CLIP work off the event loop; no-ops when vision is unavailable."""
         if not self.config.market_vision or not item.image_url or not vision.available():
             return False, ""
+        # Strongest signal first: does the listing photo actually show the same
+        # item as the reference stock image? A clear non-match drops the deal.
+        ref_note = ""
+        if self.config.market_vision_reference and reference_url:
+            sim = await asyncio.to_thread(vision.image_match, reference_url, item.image_url)
+            if sim is not None:
+                if sim < self.config.market_vision_ref_threshold:
+                    return True, ""  # photo doesn't match the actual item
+                ref_note = f"📷 Matches the item ({sim * 100:.0f}%)"
         match = await asyncio.to_thread(vision.match_score, item.image_url, query)
         if match is not None and match < self.config.market_vision_match_threshold:
             return True, ""  # photo doesn't depict the product — likely mistitled/wrong
         flags = await asyncio.to_thread(vision.vision_flags, item.image_url, item.condition)
         if flags is None:
-            return False, ""
+            return False, ref_note
         note = vision.compose_note(
             flags,
             item.condition,
@@ -681,7 +745,35 @@ class EbaySpyService:
             count_hint=self.config.market_vision_count_hint,
             count_threshold=self.config.market_vision_count_threshold,
         )
-        return False, note
+        return False, " · ".join(part for part in (ref_note, note) if part)
+
+    async def _ensure_reference_image(
+        self, row, comparable: list[MarketItem]
+    ) -> str | None:
+        """The watch's reference 'stock' image of the actual item. Uses a pinned
+        one if set; otherwise auto-derives the medoid (most representative) photo
+        from the comparable listings and persists it, so it's established once and
+        reused free thereafter. Returns the reference URL (or None)."""
+        existing = row["reference_image_url"]
+        if existing:
+            return existing
+        if not (
+            self.config.market_vision
+            and self.config.market_vision_reference
+            and self.config.market_vision_auto_reference
+            and vision.available()
+        ):
+            return None
+        urls = [item.image_url for item in comparable if item.image_url]
+        if len(urls) < 3:  # too few photos to trust a medoid
+            return None
+        chosen = await asyncio.to_thread(
+            vision.pick_reference, urls, sample=self.config.market_vision_reference_sample
+        )
+        if chosen:
+            self.store.set_market_reference_image(row["id"], chosen)
+            log.info("Auto-set reference image for watch %s: %s", row["id"], chosen)
+        return chosen
 
     def _price_trend_text(self, watch_id: int, variant: str | None) -> str:
         pct = self.store.price_trend(watch_id, variant or "")
@@ -962,6 +1054,10 @@ class EbaySpyService:
         if sold_demand_tag:
             demand_tag = sold_demand_tag
 
+        # The reference 'stock' image each listing photo is compared against,
+        # established once per watch (pinned or auto-derived) and reused free.
+        reference_url = await self._ensure_reference_image(row, comparable)
+
         muted = self.store.muted_variants(watch_id)
         ratio = self.config.market_min_deal_ratio
         candidates: list[_Deal] = []
@@ -1016,7 +1112,12 @@ class EbaySpyService:
             lot_qty = deal.lot_quantity
             offer_estimate = deal.offer_estimate
             risk_score, risk_reasons = risk_metrics.assess(item, price, home_country)
-            if risk_score > self.config.market_risk_max:
+            # ``>=`` so the documented suppression actually fires: the score is
+            # capped at 100 and the default max is 100, so a strict ``>`` could
+            # never suppress even an all-red-flags listing. Conservative by design
+            # (only the worst tier) so legitimate niche/foreign deals still come
+            # through; lower MARKET_RISK_MAX to suppress more aggressively.
+            if risk_score >= self.config.market_risk_max:
                 log.info(
                     "Suppressing high-risk deal %s on watch %s (risk %s: %s)",
                     item.item_id, watch_id, risk_score, "; ".join(risk_reasons),
@@ -1027,7 +1128,7 @@ class EbaySpyService:
                 if risk_score >= self.config.market_risk_warn and risk_reasons
                 else ""
             )
-            drop, vision_note = await self._vision_check(item, query)
+            drop, vision_note = await self._vision_check(item, query, reference_url)
             if drop:
                 log.info(
                     "Vision dropped deal %s on watch %s: image doesn't match the product",
@@ -1262,12 +1363,16 @@ class EbaySpyService:
                 "ebayspy is connected.\n"
                 "\n"
                 "WATCH a seller — alerts every poll: new, price drop, ended/sold, restock.\n"
-                "/add seller — e.g. /add techbargains_uk\n"
+                "/add seller [minprice] — e.g. /add techbargains_uk  ·  /add lithosale [100]\n"
                 "/remove seller · /list · /status · /check · /health\n"
                 "\n"
                 "OBSERVE a seller — fast new-listing alerts only, on its own interval.\n"
-                "/observe seller [interval] — e.g. /observe techbargains_uk 90s\n"
+                "/observe seller [interval] [minprice] — e.g. /observe techbargains_uk 90s [100]\n"
                 "/unobserve seller · /observing · /interval seller <time>\n"
+                "\n"
+                "PRICE FLOOR — only alert on items at/above a price, to mute cheap spam.\n"
+                "Add it in brackets when you /add or /observe, e.g. /add lithosale [100].\n"
+                "/floor seller [100] retunes it later · /floor seller none clears it.\n"
                 "\n"
                 "MARKET DEALS — alert when something lists below the going rate.\n"
                 "/watch terms [options]\n"
@@ -1282,7 +1387,11 @@ class EbaySpyService:
                 "/watch lego 75192 markets:GB,DE,US — cross-border arbitrage\n"
                 "/watch airpods pro lots:on exclude:case — job lots, drops \"case\"\n"
                 "\n"
-                "Manage: /watches · /unwatch <id> · /demand <id>\n"
+                "Manage: /watches · /unwatch <id> · /demand <id> · /refimage <id> <url>\n"
+                "Tip: in /watches, /list and /observing, tap 🗑 next to a row to "
+                "remove it — no need to type the id or name.\n"
+                "📷 Deals are matched against the item's stock photo to drop wrong items; "
+                "/refimage <id> <url> pins that photo, /refimage <id> clear reverts to auto.\n"
                 "Under a deal, tap to mute a variant, flag a wrong match, or rate 👍/👎 "
                 "(👎 raises the discount bar, 👍 relaxes it).\n"
                 "\n"
@@ -1326,11 +1435,26 @@ class EbaySpyService:
             return "\n".join(lines)
         if command == "/add":
             if not arg:
-                return "Usage: /add sellername"
-            seller = normalize_ebay_username(arg)
+                return "Usage: /add sellername [minprice]  e.g. /add lithosale [100]"
+            parts = arg.split()
+            seller = normalize_ebay_username(parts[0])
             if not is_valid_ebay_username(seller):
                 return "That does not look like a valid eBay username."
+            floor_ok, min_price = parse_price_floor(" ".join(parts[1:]))
+            if not floor_ok:
+                return "Price floor must be a number, e.g. /add lithosale [100]."
+            floor = format_price_floor(min_price)
+            floor_text = f" Alerting only on items {floor}." if floor else ""
             if self.store.has_seller(seller):
+                # Re-adding with a floor just retunes the threshold (and keeps the
+                # seen baseline) instead of rejecting the command outright.
+                if len(parts) > 1:
+                    self.store.set_seller_min_price(seller, min_price)
+                    return (
+                        f"Updated {seller}.{floor_text}"
+                        if floor
+                        else f"Updated {seller}: alerting on items at any price."
+                    )
                 return f"Already watching seller: {seller}"
             try:
                 exists = await self.ebay.seller_exists(seller)
@@ -1344,7 +1468,7 @@ class EbaySpyService:
             if exists is None:
                 log.warning("Adding eBay seller %s without external existence confirmation", seller)
             self.store.add_chat(chat_id, username)
-            added = self.store.add_seller(seller)
+            added = self.store.add_seller(seller, min_price)
             if not added:
                 return f"Already watching seller: {seller}"
             baseline_count = await self._seed_seller_baseline(seller)
@@ -1356,17 +1480,18 @@ class EbaySpyService:
             if exists is None:
                 return (
                     f"Added seller: {seller}. eBay would not confirm the profile, "
-                    f"so the next check will verify listings.{baseline_text}"
+                    f"so the next check will verify listings.{baseline_text}{floor_text}"
                 )
-            return f"Added seller: {seller}.{baseline_text}"
+            return f"Added seller: {seller}.{baseline_text}{floor_text}"
         if command == "/remove":
             if not arg:
                 return "Usage: /remove sellername"
             removed = self.store.remove_seller(arg.split()[0])
             return "Removed." if removed else "Seller was not in the watchlist."
         if command == "/list":
-            sellers = self.store.list_sellers()
-            return "Watching:\n" + "\n".join(sellers) if sellers else "No sellers yet."
+            return await self._send_table(chat_id, *self._sellers_view())
+        if command == "/floor":
+            return self._handle_floor(arg)
         if command == "/status":
             return self.status_text()
         if command == "/health":
@@ -1383,9 +1508,7 @@ class EbaySpyService:
             removed = self.store.remove_observed_seller(arg.split()[0])
             return "Stopped observing." if removed else "Seller was not on the observe list."
         if command == "/observing":
-            return format_observed_rows(
-                self.store.list_observed_sellers(), self.config.observe_interval_seconds
-            )
+            return await self._send_table(chat_id, *self._observing_view())
         if command == "/interval":
             return self._handle_interval(arg)
         if command == "/watch":
@@ -1401,25 +1524,106 @@ class EbaySpyService:
                 return "No market watch with that id."
             _, detail = self._demand_summary(int(token))
             return f"Demand for “{watch['query']}”:\n{detail}"
+        if command == "/refimage":
+            return self._handle_refimage(arg)
         if command == "/watches":
-            rows = self.store.list_market_watches()
-            trends = {
-                row["id"]: self._price_trend_text(row["id"], row["market_variant"] or "")
-                for row in rows
-            }
-            return format_market_rows(
-                rows,
-                self.config.market_interval_seconds,
-                self.config.market_discount_percent,
-                trends,
-            )
+            return await self._send_table(chat_id, *self._watches_view())
         return "Unknown command. Try /help"
 
-    async def handle_callback(self, chat_id: str, username: str | None, data: str) -> str:
-        """Handle an inline-button tap on a deal alert."""
+    # ----- tappable management lists ------------------------------------------
+    # /watches, /list and /observing render their text plus a 🗑 button per row,
+    # so anything can be removed with a tap instead of retyping its id/name. Each
+    # button's callback_data carries the action and the row key; handle_callback
+    # removes the row and edits the message in place so the list stays current.
+
+    def _watches_view(self) -> tuple[str, list[dict]]:
+        rows = self.store.list_market_watches()
+        trends = {
+            row["id"]: self._price_trend_text(row["id"], row["market_variant"] or "")
+            for row in rows
+        }
+        text = format_market_rows(
+            rows,
+            self.config.market_interval_seconds,
+            self.config.market_discount_percent,
+            trends,
+        )
+        buttons = [
+            self._remove_button(f"🗑 #{row['id']} {row['query']}", f"uw:{row['id']}")
+            for row in rows
+        ]
+        return text, [button for button in buttons if button]
+
+    def _sellers_view(self) -> tuple[str, list[dict]]:
+        rows = self.store.list_seller_rows()
+        text = format_seller_rows(rows)
+        buttons = [
+            self._remove_button(f"🗑 {row['username']}", f"rs:{row['username']}")
+            for row in rows
+        ]
+        return text, [button for button in buttons if button]
+
+    def _observing_view(self) -> tuple[str, list[dict]]:
+        rows = self.store.list_observed_sellers()
+        text = format_observed_rows(rows, self.config.observe_interval_seconds)
+        buttons = [
+            self._remove_button(f"🗑 {row['username']}", f"ro:{row['username']}")
+            for row in rows
+        ]
+        return text, [button for button in buttons if button]
+
+    @staticmethod
+    def _remove_button(label: str, data: str) -> dict | None:
+        """An inline button, or None when its callback_data won't fit Telegram's
+        64-byte cap (only a pathologically long eBay username could overflow)."""
+        if len(data.encode("utf-8")) > 64:
+            return None
+        return {"text": label[:60], "callback_data": data}
+
+    @staticmethod
+    def _table_markup(buttons: list[dict]) -> dict:
+        """One button per row, capped. An empty keyboard clears the buttons on
+        edit when the last row is removed."""
+        return {"inline_keyboard": [[button] for button in buttons[:_MAX_TABLE_BUTTONS]]}
+
+    async def _send_table(self, chat_id: str, text: str, buttons: list[dict]) -> str:
+        """Send a managed list with its remove buttons; returns "" so the command
+        loop doesn't also send the text as a plain (button-less) reply."""
+        markup = self._table_markup(buttons) if buttons else None
+        await self.telegram.send_message(
+            chat_id, html.escape(text), disable_preview=True, reply_markup=markup
+        )
+        return ""
+
+    async def _refresh_table(
+        self, chat_id: str, message_id: int | None, view: tuple[str, list[dict]]
+    ) -> None:
+        """Re-render a managed list in place after a removal so the tapped row
+        disappears. Best-effort: a failed edit just leaves the toast feedback."""
+        if not message_id:
+            return
+        text, buttons = view
+        try:
+            await self.telegram.edit_message(
+                chat_id,
+                message_id,
+                html.escape(text),
+                reply_markup=self._table_markup(buttons),
+                disable_preview=True,
+            )
+        except Exception:
+            log.debug("Could not refresh managed list after removal", exc_info=True)
+
+    async def handle_callback(
+        self, chat_id: str, username: str | None, data: str, message_id: int | None = None
+    ) -> str:
+        """Handle an inline-button tap on a deal alert or a managed list."""
         if not self.is_authorized_chat(chat_id, username):
             return "Not authorized."
         action, _, rest = data.partition(":")
+        # One-tap removals from /watches, /list, /observing tables.
+        if action in ("uw", "rs", "ro"):
+            return await self._callback_remove(chat_id, message_id, action, rest)
         watch_str, _, item_id = rest.partition(":")
         if not watch_str.isdigit() or not item_id:
             return ""
@@ -1465,6 +1669,27 @@ class EbaySpyService:
             effective = max(1, min(95, base + self.store.get_discount_nudge(watch_id)))
             return f"Thanks — required discount now ~{effective:.0f}% for this watch."
         return ""
+
+    async def _callback_remove(
+        self, chat_id: str, message_id: int | None, action: str, key: str
+    ) -> str:
+        """Remove the row a 🗑 button addresses, then refresh the list in place."""
+        if action == "uw":
+            if not key.isdigit():
+                return ""
+            removed = self.store.remove_market_watch(int(key))
+            toast = "Stopped watching." if removed else "Already removed."
+            view = self._watches_view()
+        elif action == "rs":
+            removed = self.store.remove_seller(key)
+            toast = f"Removed {key}." if removed else "Already removed."
+            view = self._sellers_view()
+        else:  # "ro"
+            removed = self.store.remove_observed_seller(key)
+            toast = f"Stopped observing {key}." if removed else "Already removed."
+            view = self._observing_view()
+        await self._refresh_table(chat_id, message_id, view)
+        return toast
 
     def _learn_exclude_from_item(self, watch_id: int, item_id: str, query: str) -> str | None:
         """Derive a distinctive exclude term from a wrongly-matched listing.
@@ -1662,6 +1887,46 @@ class EbaySpyService:
         removed = self.store.remove_market_watch(int(token))
         return "Stopped watching." if removed else "No market watch with that id."
 
+    def _handle_refimage(self, arg: str) -> str:
+        """Pin / show / clear a watch's reference 'stock' image — the photo of the
+        actual item that listing photos are compared against."""
+        parts = arg.split()
+        if not parts or not parts[0].isdigit():
+            return (
+                "Usage:\n"
+                "/refimage <id> <image-url> — pin the item's stock image\n"
+                "/refimage <id> clear — back to auto\n"
+                "/refimage <id> — show the current reference\n"
+                "(ids from /watches)"
+            )
+        watch_id = int(parts[0])
+        watch = self.store.get_market_watch(watch_id)
+        if watch is None:
+            return "No market watch with that id."
+        query = watch["query"]
+        if len(parts) == 1:
+            current = watch["reference_image_url"]
+            if current:
+                return f"Reference image for “{query}”:\n{current}"
+            return (
+                f"No reference image pinned for “{query}” — auto-deriving one from "
+                f"the market. Pin the exact stock image with /refimage {watch_id} <url>."
+            )
+        value = parts[1]
+        if value.lower() in {"clear", "auto", "off", "none"}:
+            self.store.set_market_reference_image(watch_id, None)
+            return f"Cleared the reference image for “{query}” — back to auto."
+        if not value.lower().startswith(("http://", "https://")):
+            return "That doesn't look like an image URL (it must start with http:// or https://)."
+        self.store.set_market_reference_image(watch_id, value)
+        note = "" if self.config.market_vision else (
+            "\n(Note: MARKET_VISION is off, so this isn't used yet — turn it on to compare photos.)"
+        )
+        return (
+            f"📷 Pinned the reference image for “{query}”. "
+            f"Listing photos will be compared against it.{note}"
+        )
+
     @staticmethod
     def _parse_price(value: str) -> float | None:
         cleaned = value.strip().lstrip("£$€").replace(",", "")
@@ -1674,17 +1939,37 @@ class EbaySpyService:
     async def _handle_observe(self, chat_id: str, username: str | None, arg: str) -> str:
         parts = arg.split()
         if not parts:
-            return "Usage: /observe sellername [interval e.g. 3m]"
+            return "Usage: /observe sellername [interval e.g. 3m] [minprice e.g. [100]]"
         seller = normalize_ebay_username(parts[0])
         if not is_valid_ebay_username(seller):
             return "That does not look like a valid eBay username."
+        # The two optional args (interval, price floor) may arrive in either order;
+        # a bracketed/currency-prefixed token is the floor, anything else an interval.
         interval: int | None = None
-        if len(parts) > 1:
-            interval = parse_interval(parts[1])
-            if interval is None:
-                return "Interval must look like 90s, 3m, or 1h."
-            interval = max(self.config.observe_min_interval_seconds, interval)
+        min_price: float | None = None
+        had_floor = False
+        for token in parts[1:]:
+            if looks_like_floor(token):
+                floor_ok, min_price = parse_price_floor(token)
+                if not floor_ok:
+                    return "Price floor must be a number, e.g. /observe lithosale [100]."
+                had_floor = True
+            else:
+                interval = parse_interval(token)
+                if interval is None:
+                    return "Interval must look like 90s, 3m, or 1h (price floor as [100])."
+                interval = max(self.config.observe_min_interval_seconds, interval)
+        floor = format_price_floor(min_price)
+        floor_text = f" Alerting only on items {floor}." if floor else ""
         if self.store.has_observed_seller(seller):
+            # Re-issuing with a floor retunes it without losing the seen baseline.
+            if had_floor:
+                self.store.set_observed_min_price(seller, min_price)
+                return (
+                    f"Updated {seller}.{floor_text}"
+                    if floor
+                    else f"Updated {seller}: alerting on items at any price."
+                )
             return f"Already observing seller: {seller}"
         try:
             exists = await self.ebay.seller_exists(seller)
@@ -1692,7 +1977,7 @@ class EbaySpyService:
             log.warning("Could not validate eBay seller %s for observe", seller)
             return "I could not verify that seller with eBay right now. Try again in a minute."
         self.store.add_chat(chat_id, username)
-        if not self.store.add_observed_seller(seller, interval):
+        if not self.store.add_observed_seller(seller, interval, min_price):
             return f"Already observing seller: {seller}"
         baseline_count = await self._seed_observe_baseline(seller)
         baseline_text = (
@@ -1706,7 +1991,29 @@ class EbaySpyService:
             if exists is not None
             else " eBay would not confirm the profile, but I will keep checking."
         )
-        return f"Observing seller: {seller} every {every}.{baseline_text}{confirm}"
+        return f"Observing seller: {seller} every {every}.{baseline_text}{floor_text}{confirm}"
+
+    def _handle_floor(self, arg: str) -> str:
+        """Set or clear the price floor on a seller already on the watch/observe
+        list, without dropping its seen baseline. ``none``/``any``/``0`` clears it."""
+        parts = arg.split()
+        if len(parts) < 2:
+            return "Usage: /floor sellername [100]   (use /floor sellername none to clear)"
+        seller = normalize_ebay_username(parts[0])
+        floor_ok, min_price = parse_price_floor(" ".join(parts[1:]))
+        if not floor_ok:
+            return "Price floor must be a number, e.g. /floor lithosale [100]."
+        on_watch = self.store.set_seller_min_price(seller, min_price)
+        on_observe = self.store.set_observed_min_price(seller, min_price)
+        if not on_watch and not on_observe:
+            return f"{seller} is not on the watch or observe list. Add it first."
+        lists = " and ".join(
+            label for label, hit in (("watch", on_watch), ("observe", on_observe)) if hit
+        )
+        floor = format_price_floor(min_price)
+        if floor:
+            return f"{seller} ({lists}): alerting only on items {floor}."
+        return f"{seller} ({lists}): alerting on items at any price."
 
     def _handle_interval(self, arg: str) -> str:
         parts = arg.split()

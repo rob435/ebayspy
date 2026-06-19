@@ -1,11 +1,91 @@
 import asyncio
 
+import httpx
+
 from ebayspy.models import Listing, MarketItem
-from ebayspy.telegram import TelegramBot, format_seller_rating
+from ebayspy.telegram import (
+    CAPTION_LIMIT,
+    MESSAGE_LIMIT,
+    TelegramBot,
+    TelegramError,
+    _truncate_html,
+    format_seller_rating,
+)
 
 
 def _bot(global_id: str = "EBAY-GB") -> TelegramBot:
     return TelegramBot("token", 1, global_id)
+
+
+class _CapturingClient:
+    """Records outgoing requests so message hardening can be asserted."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    async def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+
+        class _Resp:
+            def raise_for_status(self_inner) -> None:
+                pass
+
+            def json(self_inner) -> dict:
+                return {"result": []}
+
+        return _Resp()
+
+    async def aclose(self) -> None:
+        pass
+
+
+def test_truncate_html_clips_long_text_without_breaking_tags() -> None:
+    text = "\n".join(f"<b>line {i}</b>" for i in range(2000))
+    out = _truncate_html(text, MESSAGE_LIMIT)
+    assert len(out) <= MESSAGE_LIMIT
+    assert out.endswith("…")
+    # Never ends inside a tag (would make Telegram reject the whole message).
+    assert out.rfind("<") <= out.rfind(">")
+    # Short text is returned untouched.
+    assert _truncate_html("hello", MESSAGE_LIMIT) == "hello"
+
+
+def test_send_message_truncates_to_telegram_limit() -> None:
+    bot = _bot()
+    bot.client = _CapturingClient()
+    asyncio.run(bot.send_message("c", "x" * (MESSAGE_LIMIT + 5000)))
+    sent = bot.client.calls[0][2]["json"]["text"]
+    assert len(sent) <= MESSAGE_LIMIT
+
+
+def test_send_photo_truncates_caption() -> None:
+    bot = _bot()
+    bot.client = _CapturingClient()
+    asyncio.run(bot.send_photo("c", "http://img", "y" * (CAPTION_LIMIT + 500)))
+    caption = bot.client.calls[0][2]["json"]["caption"]
+    assert len(caption) <= CAPTION_LIMIT
+
+
+def test_api_error_scrubs_bot_token() -> None:
+    bot = TelegramBot("SECRET-TOKEN-123", 1)
+
+    class _LeakyClient:
+        async def request(self, method, url, **kwargs):
+            # httpx puts the full token-bearing URL into the error message.
+            raise httpx.ConnectError(f"connection failed for {url}")
+
+        async def aclose(self) -> None:
+            pass
+
+    bot.client = _LeakyClient()
+    try:
+        asyncio.run(bot.send_message("c", "hello"))
+        raise AssertionError("expected TelegramError")
+    except TelegramError as exc:
+        assert "SECRET-TOKEN-123" not in str(exc)
+        assert "***" in str(exc)
+    finally:
+        asyncio.run(bot.close())
 
 
 def test_format_seller_rating() -> None:

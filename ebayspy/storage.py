@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,7 +122,8 @@ class Store:
                 consecutive_errors integer not null default 0,
                 consecutive_empty integer not null default 0,
                 health_alerted integer not null default 0,
-                discount_nudge real not null default 0
+                discount_nudge real not null default 0,
+                reference_image_url text
             );
 
             create table if not exists market_deal_alerts (
@@ -234,6 +236,12 @@ class Store:
         chat_columns = self._table_columns("telegram_chats")
         if "username" not in chat_columns:
             self.conn.execute("alter table telegram_chats add column username text")
+        # Per-seller minimum price floor: suppress alerts for items below it so a
+        # spammy seller's cheap junk never reaches Telegram. NULL means "any price".
+        if "min_price" not in self._table_columns("sellers"):
+            self.conn.execute("alter table sellers add column min_price real")
+        if "min_price" not in self._table_columns("observed_sellers"):
+            self.conn.execute("alter table observed_sellers add column min_price real")
         market_columns = self._table_columns("market_watches")
         market_defaults = {
             "exclude_terms": "text",
@@ -248,6 +256,7 @@ class Store:
             "consecutive_empty": "integer not null default 0",
             "health_alerted": "integer not null default 0",
             "discount_nudge": "real not null default 0",
+            "reference_image_url": "text",
         }
         for column, definition in market_defaults.items():
             if column not in market_columns:
@@ -360,13 +369,16 @@ class Store:
         for old in snapshots[:-keep]:
             old.unlink(missing_ok=True)
 
-    def add_seller(self, username: str) -> bool:
+    def add_seller(self, username: str, min_price: float | None = None) -> bool:
         username = normalize_ebay_username(username)
         if not username:
             return False
         if self.has_seller(username):
             return False
-        self.conn.execute("insert or ignore into sellers(username) values (?)", (username,))
+        self.conn.execute(
+            "insert or ignore into sellers(username, min_price) values (?, ?)",
+            (username, min_price),
+        )
         self.conn.commit()
         return True
 
@@ -375,6 +387,20 @@ class Store:
             "select 1 from sellers where lower(username) = lower(?) limit 1", (username,)
         ).fetchone()
         return row is not None
+
+    def get_seller_min_price(self, username: str) -> float | None:
+        row = self.conn.execute(
+            "select min_price from sellers where lower(username) = lower(?) limit 1", (username,)
+        ).fetchone()
+        return row["min_price"] if row else None
+
+    def set_seller_min_price(self, username: str, min_price: float | None) -> bool:
+        cur = self.conn.execute(
+            "update sellers set min_price = ? where lower(username) = lower(?)",
+            (min_price, username),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def remove_seller(self, username: str) -> bool:
         cur = self.conn.execute("delete from sellers where lower(username) = lower(?)", (username,))
@@ -386,7 +412,13 @@ class Store:
         new_username = new_username.strip()
         if not old_username or not new_username or old_username.lower() == new_username.lower():
             return False
-        self.conn.execute("insert or ignore into sellers(username) values (?)", (new_username,))
+        # Carry the price floor across the rename so a tuned threshold survives a
+        # seller changing their eBay username.
+        min_price = self.get_seller_min_price(old_username)
+        self.conn.execute(
+            "insert or ignore into sellers(username, min_price) values (?, ?)",
+            (new_username, min_price),
+        )
         cur = self.conn.execute(
             "delete from sellers where lower(username) = lower(?)", (old_username,)
         )
@@ -406,15 +438,23 @@ class Store:
         rows = self.conn.execute("select username from sellers order by lower(username)").fetchall()
         return [row["username"] for row in rows]
 
-    def add_observed_seller(self, username: str, interval_seconds: int | None = None) -> bool:
+    def list_seller_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "select * from sellers order by lower(username)"
+        ).fetchall()
+
+    def add_observed_seller(
+        self, username: str, interval_seconds: int | None = None, min_price: float | None = None
+    ) -> bool:
         username = normalize_ebay_username(username)
         if not username:
             return False
         if self.has_observed_seller(username):
             return False
         self.conn.execute(
-            "insert or ignore into observed_sellers(username, interval_seconds) values (?, ?)",
-            (username, interval_seconds),
+            "insert or ignore into observed_sellers(username, interval_seconds, min_price) "
+            "values (?, ?, ?)",
+            (username, interval_seconds, min_price),
         )
         self.conn.commit()
         return True
@@ -424,6 +464,21 @@ class Store:
             "select 1 from observed_sellers where lower(username) = lower(?) limit 1", (username,)
         ).fetchone()
         return row is not None
+
+    def get_observed_min_price(self, username: str) -> float | None:
+        row = self.conn.execute(
+            "select min_price from observed_sellers where lower(username) = lower(?) limit 1",
+            (username,),
+        ).fetchone()
+        return row["min_price"] if row else None
+
+    def set_observed_min_price(self, username: str, min_price: float | None) -> bool:
+        cur = self.conn.execute(
+            "update observed_sellers set min_price = ? where lower(username) = lower(?)",
+            (min_price, username),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def remove_observed_seller(self, username: str) -> bool:
         cur = self.conn.execute(
@@ -561,6 +616,15 @@ class Store:
 
     def list_market_watches(self) -> list[sqlite3.Row]:
         return self.conn.execute("select * from market_watches order by id").fetchall()
+
+    def set_market_reference_image(self, watch_id: int, url: str | None) -> None:
+        """Pin (or clear, with url=None) the watch's reference 'stock' image — the
+        photo of the actual item that listing photos are compared against."""
+        self.conn.execute(
+            "update market_watches set reference_image_url = ? where id = ?",
+            (url or None, watch_id),
+        )
+        self.conn.commit()
 
     def update_market_price(
         self,
@@ -1329,6 +1393,16 @@ def format_status_rows(rows: list[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
+def format_seller_rows(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return "No sellers yet."
+    lines = []
+    for row in rows:
+        floor = format_price_floor(row["min_price"])
+        lines.append(f"{row['username']} (min {floor[1:]})" if floor else row["username"])
+    return "Watching:\n" + "\n".join(lines)
+
+
 def format_observed_rows(rows: list[sqlite3.Row], default_interval_seconds: int) -> str:
     if not rows:
         return "No observed sellers yet. Add one with /observe sellername [interval]."
@@ -1336,14 +1410,19 @@ def format_observed_rows(rows: list[sqlite3.Row], default_interval_seconds: int)
     for row in rows:
         interval = row["interval_seconds"] or default_interval_seconds
         every = format_interval(interval)
+        floor = format_price_floor(row["min_price"])
+        floor_note = f" (min {floor[1:]})" if floor else ""
         error = row["last_error"]
         observed = row["last_observed_at"] or "never"
         if error:
-            lines.append(f"{row['username']}: every {every}, ERROR at {observed}: {error[:120]}")
+            lines.append(
+                f"{row['username']}: every {every}{floor_note}, ERROR at {observed}: {error[:120]}"
+            )
         else:
             new = row["last_new_count"] if row["last_new_count"] is not None else "-"
             lines.append(
-                f"{row['username']}: every {every}, {new} new last check, checked {observed}"
+                f"{row['username']}: every {every}{floor_note}, "
+                f"{new} new last check, checked {observed}"
             )
     return "Observing:\n" + "\n".join(lines)
 
@@ -1395,10 +1474,74 @@ def format_market_rows(
     return "Market watches:\n" + "\n".join(lines)
 
 
+_FLOOR_PREFIXES = ("min:", "over:", ">=", ">")
+
+
+def passes_min_price(price: str | None, min_price: float | None) -> bool:
+    """Whether a listing at ``price`` clears the seller's floor.
+
+    Fails open: with no floor, or when the price can't be parsed, the listing
+    passes — better to over-alert than to silently drop a genuine item.
+    """
+    if not min_price:
+        return True
+    parsed = _parse_price_amount(price)
+    if parsed is None:
+        return True
+    return parsed[0] >= min_price
+
+
+def looks_like_floor(token: str) -> bool:
+    """True when a token is unambiguously a price floor (bracketed, currency- or
+    keyword-prefixed) rather than an interval — used to disambiguate /observe args."""
+    text = token.strip()
+    if text.startswith("[") and text.endswith("]"):
+        return True
+    if text[:1] in {"£", "$", "€"}:
+        return True
+    low = text.lower()
+    return any(low.startswith(prefix) for prefix in _FLOOR_PREFIXES)
+
+
+def parse_price_floor(value: str | None) -> tuple[bool, float | None]:
+    """Parse a price-floor expression into ``(ok, floor)``.
+
+    Accepts ``100``, ``[100]``, ``£100``, ``min:100``. ``ok`` is False only when
+    text was given that isn't a valid floor (caller should error). ``floor`` is
+    None when the input is empty or a clear word (``any``/``none``/``off``/``0``),
+    meaning "no floor".
+    """
+    text = (value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if not text:
+        return (True, None)
+    low = text.lower()
+    if low in {"any", "none", "off", "all", "0"}:
+        return (True, None)
+    for prefix in _FLOOR_PREFIXES:
+        if low.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    text = text.lstrip("£$€").replace(",", "").strip()
+    try:
+        amount = float(text)
+    except ValueError:
+        return (False, None)
+    return (True, amount) if amount > 0 else (True, None)
+
+
+def format_price_floor(min_price: float | None) -> str:
+    """Render a floor as a compact ``≥100`` tag, or "" when there is none."""
+    if not min_price:
+        return ""
+    if float(min_price).is_integer():
+        return f"≥{int(min_price)}"
+    return f"≥{min_price:g}"
+
+
 def parse_interval(value: str | None) -> int | None:
     """Parse a human interval like '90', '90s', '3m', or '1h' into seconds."""
-    import re
-
     text = (value or "").strip().lower()
     match = re.fullmatch(r"(\d+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?", text)
     if not match:
