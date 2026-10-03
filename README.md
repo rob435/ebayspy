@@ -1,6 +1,6 @@
 # ebayspy
 
-Track specific eBay sellers from a VPS and receive Telegram notifications when they list new items.
+Track specific eBay sellers and items and receive Telegram notifications when they list new items.
 
 ## What it does
 
