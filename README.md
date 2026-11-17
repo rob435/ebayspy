@@ -174,14 +174,21 @@ evidence, each with an honest error bar, fused into one **fair value**:
 | Evidence | What it is | Trust |
 | --- | --- | --- |
 | **asks** | live asking prices in the sample | plentiful but biased high |
-| **ended** | last price of listings confirmed to have ended in the past `MARKET_CLEARED_WINDOW_DAYS`, newest weighted most | a proxy for a sale |
+| **ended** | last price of listings that `getItem` confirmed ended in the past `MARKET_CLEARED_WINDOW_DAYS`, newest weighted most | a proxy for a sale |
 | **sold** | real completed sales (Marketplace Insights, if entitled) | best |
 
 For each source: one seller's duplicate listings are down-weighted (k copies count as √k),
 the centre is a weighted median, the spread a robust (MAD) estimate in log-price space, and
 anything more than ~3 robust sigmas out — or outside a hard 0.4×–2.5× band — is clipped.
-Sources are combined by inverse variance, and when they disagree by more than their error
-bars allow, the interval is widened rather than papered over.
+A spread measured from a handful of prices is shrunk toward a prior, and a source needs the
+weight of about three independent observations before it may move the figure at all, so one
+or two ended listings cannot outvote a live market. Sources are combined by inverse
+variance, and when they disagree by more than their error bars allow, the interval is
+widened rather than papered over.
+
+A listing merely dropping out of the sample is not evidence of anything — a changed filter
+makes live listings vanish too — so up to `MARKET_VERIFY_ENDED_LIMIT` per check are
+confirmed with `getItem`, and only confirmed endings inform the price.
 
 What that buys you:
 
@@ -189,12 +196,16 @@ What that buys you:
   Asking prices alone never score above 50% however many there are; confidence builds as the
   watch observes listings ending (or has sold data).
 - **A deal bar that adapts.** Your `discount:` always applies. On top, the gap must exceed
-  `MARKET_CONFIDENCE_Z` (default 1) standard deviations of ordinary scatter, so a thin or
-  noisy market needs a bigger gap before it is called a deal, while a tight one is
+  `MARKET_CONFIDENCE_Z` (default 1) standard deviations of that market's ordinary scatter
+  (its listing-to-listing spread plus the sampling error of its centre), so a thin or noisy
+  market needs a bigger gap before it is called a deal, while a tight, well-sampled one is
   unaffected. Set `MARKET_CONFIDENCE_Z=0` for the plain percentage rule.
-- **Like-for-like variants.** The market is split by model line, capacity, **condition**
-  (new / open box / refurbished / used) and colour — but only on a dimension that moves the
-  price *within* the groups already chosen, by more than noise. A listing that doesn't state
+- **Like-for-like variants.** The market is split by model line, **generation**, capacity,
+  **condition** (new / open box / refurbished / used) and colour — but only on a dimension
+  that most listings state, that moves the price *within* the groups already chosen by more
+  than noise, and that does not strand the market in groups too small to price. So a watch on
+  `echo dot` prices the 3rd and 4th generation as separate markets, while a phone is not
+  "priced by colour" because one colour happened to be dearest. A listing that doesn't state
   a chosen attribute is left unpriced rather than guessed, and the chosen split is sticky so
   labels don't flip between checks.
 - **Realistic flip numbers.** Profit is net of the marketplace fee *and* the postage you pay
@@ -210,6 +221,27 @@ prices are treated as a proxy with their own error bar, not as sales. The error 
 each source are priors, not measurements from your market. And none of this has access to
 what the matcher gets wrong: a watch that matches the wrong items prices the wrong market,
 which is why `/quote` shows the comparable counts.
+
+## Dry runs
+
+`ebayspy dryrun` prices one market and shows the working, without sending an alert or
+saving anything. It drives the same code the live service runs — response parser, matcher,
+variant split, fair-value engine, risk screen, deal selection — with an in-memory store and
+a Telegram that only records, so what it lists as a deal is exactly what would have alerted.
+
+```bash
+ebayspy dryrun "sony wh-1000xm5" --condition used --discount 20
+ebayspy dryrun "sony wh-1000xm5" --record xm5.json     # save the live search
+ebayspy dryrun "sony wh-1000xm5" --replay xm5.json     # re-run it offline, no API calls
+ebayspy dryrun "sony wh-1000xm5" --replay xm5.json --json > report.json
+```
+
+The report gives, per variant, the fair value with its range, confidence, spread and the
+evidence behind it; the price alerts fire at; every deal that would alert, ranked, with its
+flip estimate and risk note; and every rejected listing grouped by the rule that rejected it
+(`accessory:…`, `identity:…`, `condition:…`, `category:…`). Recording a search and replaying
+it is the way to check a tuning change (an `exclude:`, a different `MARKET_CONFIDENCE_Z`)
+against the same real listings before and after. Needs only the eBay keys, not Telegram.
 
 ## Setup
 
