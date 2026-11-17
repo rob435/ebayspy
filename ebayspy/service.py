@@ -6,7 +6,7 @@ import json
 import logging
 import signal
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import NamedTuple
 
@@ -40,6 +40,7 @@ from .matching import (
     canonicalize,
     content_tokens,
     filter_comparable,
+    generation_of,
     lot_quantity,
     match_verdict,
     register_aliases,
@@ -740,6 +741,11 @@ class EbaySpyService:
                     rejected[item.item_id] = match_verdict(
                         row["query"], item.title, **rules
                     ).reason
+        # Stamp each match with the generation its title states relative to this
+        # query, so a watch that pins none prices each generation separately.
+        matched = [
+            replace(item, generation=generation_of(row["query"], item.title)) for item in matched
+        ]
         if allow_lots or row["category_id"]:
             return matched
         kept = self._category_consensus(matched)

@@ -19,7 +19,7 @@ from .models import MarketItem
 # only when it independently splits the market (see choose_cluster_dimensions),
 # so a watch is priced per model-line *and* capacity when both matter, but not
 # fragmented on an attribute (e.g. colour) that does not move the price.
-CLUSTER_DIMENSIONS = ("qualifier", "capacity", "condition", "colour")
+CLUSTER_DIMENSIONS = ("qualifier", "generation", "capacity", "condition", "colour")
 
 # eBay aspect names (lowercased) that authoritatively carry each variant value.
 # "Memory" is deliberately absent: on phones and laptops it is RAM, not storage.
@@ -265,6 +265,10 @@ def _item_variant(item, dimension: str) -> str | None:
         return condition_bucket(
             getattr(item, "condition", ""), getattr(item, "condition_id", "")
         ) or None
+    elif dimension == "generation":
+        # Relative to the watch's query, so it is stamped on the item by the
+        # service rather than parsed here (see MarketItem.generation).
+        return getattr(item, "generation", "") or None
     return attributes(item.title).get(dimension)  # type: ignore[return-value]
 
 
@@ -288,10 +292,17 @@ def label_from_values(
         value = values.get(dimension)
         if not value:
             return None
-        if dimension == "qualifier" and value == "base":
-            continue
-        parts.append(value)
+        part = _label_part(dimension, value)
+        if part:
+            parts.append(part)
     return " · ".join(parts)
+
+
+def _label_part(dimension: str, value: str) -> str:
+    """How one dimension's value reads in a label ("" when it adds nothing)."""
+    if dimension in ("qualifier", "generation") and value == "base":
+        return ""
+    return f"gen {value}" if dimension == "generation" else value
 
 
 def variant_key(item, dimensions: Sequence[str]) -> str | None:
@@ -305,14 +316,11 @@ def variant_label(item, dimensions: Sequence[str]) -> str:
     The plain base model and unknown attributes contribute nothing, so a base
     256GB reads "256gb" while a Pro Max 256GB reads "pro max · 256gb".
     """
-    parts = []
-    for dimension in dimensions:
-        value = _item_variant(item, dimension)
-        if dimension == "qualifier":
-            if value and value != "base":
-                parts.append(value)
-        elif value:
-            parts.append(value)
+    parts = [
+        part
+        for dimension in dimensions
+        if (value := _item_variant(item, dimension)) and (part := _label_part(dimension, value))
+    ]
     return " · ".join(parts)
 
 

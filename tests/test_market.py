@@ -353,3 +353,33 @@ def test_resale_profit_subtracts_postage() -> None:
     paper, _ = estimate_resale_profit(100, 85, 12.8, 0.30)
     real, _ = estimate_resale_profit(100, 85, 12.8, 0.30, 10.0)
     assert round(paper, 2) == 1.90 and round(real, 2) == -8.10
+
+
+def _generation(item_id: str, total: float, generation: str) -> MarketItem:
+    return MarketItem(
+        item_id=item_id, title="Amazon Echo Dot Smart Speaker", url="u", seller=f"s-{item_id}",
+        currency="GBP", item_price=total, total_price=total, generation=generation,
+    )
+
+
+def test_unpinned_generations_are_priced_separately() -> None:
+    # A watch on "echo dot": the 2nd, 3rd and 4th generation trade at different
+    # levels. They are all comparables, but never one blended market.
+    items = [_generation(f"a{i}", 20 + i * 0.2, "2") for i in range(6)]
+    items += [_generation(f"b{i}", 30 + i * 0.2, "3") for i in range(8)]
+    items += [_generation(f"c{i}", 45 + i * 0.2, "4") for i in range(7)]
+    items += [_generation(f"d{i}", 31 + i, "base") for i in range(3)]  # none stated
+    dims = choose_cluster_dimensions(items, set(), min_sample=5, min_dispersion=0.12)
+    assert dims == ["generation"]
+    clusters = cluster_by_variant(items, dims)
+    assert {label: len(group) for label, group in clusters.items()} == {
+        "gen 2": 6, "gen 3": 8, "gen 4": 7, "": 3,
+    }
+    assert label_from_values({"generation": "3", "capacity": "32gb"}, ["generation", "capacity"]) == (
+        "gen 3 · 32gb"
+    )
+    # Items the service has not stamped (no generation) never trigger the split.
+    plain = [_phone(f"p{i}", 300 + i, "128GB") for i in range(12)]
+    assert "generation" not in choose_cluster_dimensions(
+        plain, set(), min_sample=5, min_dispersion=0.12
+    )

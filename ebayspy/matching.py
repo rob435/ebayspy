@@ -562,3 +562,7 @@ class Verdict(NamedTuple):
 def match_verdict(query: str, title: str, **kwargs) -> Verdict:
     ok = is_comparable(query, title, **kwargs)
     return Verdict(ok, "ok" if ok else "not comparable")
+
+
+def generation_of(query: str, title: str) -> str:
+    return "base"

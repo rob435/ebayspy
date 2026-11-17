@@ -50,6 +50,10 @@ class MarketItem:
     gtin: str = ""
     mpn: str = ""
     aspects: dict[str, str] = field(default_factory=dict)
+    # Set by the service once the listing is matched to a watch: the product
+    # generation its title states relative to the watch's query ("3" for an
+    # "Echo Dot (3rd Gen)" under a watch on "echo dot"; "base" when none stated).
+    generation: str = ""
 
     @property
     def is_auction(self) -> bool:
@@ -79,3 +83,4 @@ class SoldItem:
     condition: str = ""
     condition_id: str = ""
     seller: str = ""
+    generation: str = ""
