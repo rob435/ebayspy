@@ -1181,7 +1181,7 @@ class EbaySpyService:
         for auction in snap.auctions:
             label = variant_key(auction, snap.dimensions)
             fair = snap.quotes.get(label) if label is not None else None
-            if fair is None or self._is_muted(label, muted):
+            if fair is None or self._is_muted(label, muted) or not self._alertable(fair):
                 continue
             secs = self._seconds_until(auction.end_date)
             if secs is not None and secs <= 0:
@@ -1236,7 +1236,7 @@ class EbaySpyService:
                 continue
             label = variant_key(lot, snap.dimensions)
             fair = snap.quotes.get(label) if label is not None else None
-            if fair is None or self._is_muted(label, muted):
+            if fair is None or self._is_muted(label, muted) or not self._alertable(fair):
                 continue
             lot_value = fair.price * quantity
             ceiling = deal_threshold(
@@ -1250,6 +1250,12 @@ class EbaySpyService:
                 _Deal(lot, lot_value, label or None, "lot", lot_quantity=quantity, quote=fair)
             )
         return out
+
+    def _alertable(self, fair: pricing.FairValue) -> bool:
+        """Whether a quote is trustworthy enough to alert against. Below the
+        floor the "market" is too thin or too mixed to say what anything in it
+        is worth: it is still quoted (with its low confidence), never traded on."""
+        return fair.confidence >= self.config.market_min_confidence
 
     @staticmethod
     def _is_muted(label: str, muted: set[str]) -> bool:
@@ -1276,7 +1282,7 @@ class EbaySpyService:
         z = self.config.market_confidence_z
         found: list[_Deal] = []
         for label, fair in snap.quotes.items():
-            if self._is_muted(label, muted):
+            if self._is_muted(label, muted) or not self._alertable(fair):
                 continue
             group = snap.clusters.get(label, [])
             for item in find_deals(

@@ -152,6 +152,7 @@ class Config:
     market_risk_max: int
     # Fair-value engine.
     market_confidence_z: float
+    market_min_confidence: int
     market_cleared_window_days: int
     market_verify_ended_limit: int
     market_category_consensus: float
@@ -256,6 +257,7 @@ class Config:
             market_risk_warn=_int_env("MARKET_RISK_WARN", 40),
             market_risk_max=_int_env("MARKET_RISK_MAX", 100),
             market_confidence_z=_float_env("MARKET_CONFIDENCE_Z", 1.0),
+            market_min_confidence=_int_env("MARKET_MIN_CONFIDENCE", 10),
             market_cleared_window_days=_int_env("MARKET_CLEARED_WINDOW_DAYS", 30),
             market_verify_ended_limit=_int_env("MARKET_VERIFY_ENDED_LIMIT", 3),
             market_category_consensus=_float_env("MARKET_CATEGORY_CONSENSUS", 0.7),

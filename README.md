@@ -208,6 +208,12 @@ What that buys you:
   "priced by colour" because one colour happened to be dearest. A listing that doesn't state
   a chosen attribute is left unpriced rather than guessed, and the chosen split is sticky so
   labels don't flip between checks.
+- **It declines to trade what it can't price.** Model line and generation are product
+  identity, so once two of them are each well-populated they are always priced apart — a
+  Fenix 5 is never "54% under" a market of Fenix 6s — even when that leaves thinner ones
+  unpriced. And a quote below `MARKET_MIN_CONFIDENCE` (default 10%) is still shown but never
+  alerted against. A brand-level watch (`oneplus`, `roku`) therefore prices only the models
+  it has enough of, and `/watch` tells you when a market looks like several products.
 - **Realistic flip numbers.** Profit is net of the marketplace fee *and* the postage you pay
   (`MARKET_RESALE_SHIPPING`), shown both at fair value and at a quick-sale price.
 - **`/quote <id>`** prints the working for a watch: fair value, range, confidence, the
@@ -234,7 +240,7 @@ hand-labelled as "is this a single working unit of the product, yes or no".
 | Listings correctly kept / dropped — 15 searches used to develop the rules (precision / recall) | 0.85 / 0.90 | 0.97 / 0.99 |
 | Same — 14 **held-out** searches no rule was tuned on | 0.88 / 0.90 | 0.96 / 0.97 |
 | Alerts that were not the product — development searches | 30 of 213 | 5 of 167 |
-| Alerts that were not the product — **held-out** searches | 22 of 145 | 4 of 97 |
+| Alerts that were not the product — **held-out** searches | 22 of 145 | 4 of 96 |
 | Fair value's distance from a perfect-matcher quote, mean — development / held-out | 20% with the old matcher / not measured | 4% / 11% |
 
 What those numbers do and don't say:

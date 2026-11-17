@@ -53,6 +53,12 @@ _MIN_STATED_SHARE = 0.5
 # ...and adding it must keep at least this share of the currently priceable
 # listings priceable: a finer split is worthless if its cells are too thin.
 _MIN_COVERAGE_KEPT = 0.8
+# Model line and generation are product identity, not flavour: a Fenix 5 is not
+# a cheap Fenix 6. Once two of them are each well-populated and materially
+# apart they are split even if the gap is statistically noisy and even if it
+# leaves thinner ones unpriced — an unpriced listing is honest, a listing
+# "54% under" a blend of other products is a false deal.
+_IDENTITY_DIMENSIONS = frozenset({"qualifier", "generation"})
 
 
 def condition_bucket(condition: str = "", condition_id: str = "") -> str:
@@ -400,8 +406,9 @@ def choose_cluster_dimensions(
     most listings state it, its groups' prices differ both materially
     (``min_dispersion``, the relative gap between two groups' medians) and
     significantly, and splitting on it does not strand the market in clusters
-    too small to price. Items are then clustered by the *combination* of
-    qualifying dimensions.
+    too small to price. Model line and generation — which name different
+    products rather than flavours of one — need only the material gap. Items
+    are then clustered by the *combination* of qualifying dimensions.
 
     ``previous`` makes the choice sticky: a dimension already in use is dropped
     only on positive evidence that it has stopped mattering (effect under half
@@ -424,6 +431,8 @@ def choose_cluster_dimensions(
         evidence = _dimension_effect(items, chosen, dimension, min_sample)
         if dimension in previous:
             keep = evidence is None or evidence[0] >= threshold / 2
+        elif dimension in _IDENTITY_DIMENSIONS:
+            keep = evidence is not None and evidence[0] >= threshold
         else:
             keep = (
                 evidence is not None

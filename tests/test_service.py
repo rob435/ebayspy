@@ -205,6 +205,7 @@ def _service_config() -> SimpleNamespace:
         market_risk_warn=40,
         market_risk_max=100,
         market_confidence_z=1.0,
+        market_min_confidence=10,
         market_cleared_window_days=30,
         market_verify_ended_limit=3,
         market_category_consensus=0.7,
@@ -2258,5 +2259,27 @@ def test_media_word_is_judged_by_price_level(tmp_path: Path) -> None:
         book = store.add_market_watch("atomic habits")
         _check(service, store, book)
         assert store.get_market_watch(book)["comparable_size"] == 6
+    finally:
+        store.close()
+
+
+def test_no_alerts_against_a_quote_below_the_confidence_floor(tmp_path: Path) -> None:
+    # Six listings scattered over a 4x range: something is priced, but with so
+    # little confidence that "40% under" means nothing. It is quoted, not traded.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Garmin Fenix GPS Watch"
+    prices = [150, 240, 330, 450, 520, 610]
+    ebay.market_items = [_market_item(f"m{i}", p, title) for i, p in enumerate(prices)]
+    service = _market_service(store, ebay)
+    service.config.market_confidence_z = 0.0  # isolate the confidence floor
+    service.config.market_min_confidence = 15
+    try:
+        watch_id = store.add_market_watch("garmin fenix")
+        assert _check(service, store, watch_id) == 0
+        row = store.get_market_watch(watch_id)
+        assert row["market_price"] is not None and row["market_confidence"] < 15
+        service.config.market_min_confidence = 0  # floor off: the cheap one alerts
+        assert _check(service, store, watch_id) >= 1
     finally:
         store.close()

@@ -420,3 +420,19 @@ def test_split_that_would_strand_the_market_in_thin_cells_is_refused() -> None:
     # ...whereas a clean two-way split keeps everything priceable and is taken.
     clean = [i for i in more if "32GB" in i.title or "64GB" in i.title]
     assert choose_cluster_dimensions(clean, set(), **kwargs) == ["capacity"]
+
+
+def test_product_identity_is_split_even_when_the_gap_is_noisy() -> None:
+    # Two generations, six listings each, medians ~45% apart but each scattered
+    # widely. For a flavour (capacity, colour) that would not be enough to split.
+    # For a generation it is: these are different products, and blending them
+    # makes every listing of the cheaper one look like a deal.
+    older = [150, 190, 230, 260, 300, 380]
+    newer = [280, 340, 400, 450, 520, 640]
+    by_generation = [_generation(f"a{i}", p, "5") for i, p in enumerate(older)]
+    by_generation += [_generation(f"b{i}", p, "6") for i, p in enumerate(newer)]
+    kwargs = {"min_sample": 5, "min_dispersion": 0.12}
+    assert choose_cluster_dimensions(by_generation, set(), **kwargs) == ["generation"]
+    by_capacity = [_phone(f"a{i}", p, "128GB") for i, p in enumerate(older)]
+    by_capacity += [_phone(f"b{i}", p, "256GB") for i, p in enumerate(newer)]
+    assert choose_cluster_dimensions(by_capacity, set(), **kwargs) == []

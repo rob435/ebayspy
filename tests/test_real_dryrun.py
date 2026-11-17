@@ -92,7 +92,7 @@ def _replay(name: str) -> tuple[Counter, Counter, list[str]]:
     [
         # measured: 162 genuine / 5 wrong alerts (0.970); matching P 0.966 R 0.994
         ("real_listings.json", 0.95, 0.95, 0.97),
-        # measured (held out): 93 genuine / 4 wrong alerts (0.959); matching P 0.963 R 0.972
+        # measured (held out): 92 genuine / 4 wrong alerts (0.958); matching P 0.963 R 0.972
         ("real_listings_holdout.json", 0.93, 0.94, 0.95),
     ],
 )
