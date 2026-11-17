@@ -383,3 +383,40 @@ def test_unpinned_generations_are_priced_separately() -> None:
     assert "generation" not in choose_cluster_dimensions(
         plain, set(), min_sample=5, min_dispersion=0.12
     )
+
+
+def test_many_valued_attribute_does_not_split_on_the_gap_between_extremes() -> None:
+    # Six colours, identical pricing, ordinary scatter. The dearest colour's
+    # median will sit well above the cheapest's by chance alone; measured across
+    # all the groups there is nothing there, so the market is not split by colour.
+    import random
+
+    rng = random.Random(3)
+    items = []
+    for colour in ("Black", "Silver", "Gold", "Red", "Blue", "Green"):
+        for i in range(7):
+            price = 200 * (1 + rng.uniform(-0.25, 0.25))
+            items.append(_phone(f"{colour}{i}", price, f"64GB {colour}"))
+    medians = {}
+    for colour in ("black", "silver", "gold", "red", "blue", "green"):
+        prices = sorted(i.total_price for i in items if colour in i.title.lower())
+        medians[colour] = prices[len(prices) // 2]
+    assert (max(medians.values()) - min(medians.values())) / max(medians.values()) > 0.12
+    assert choose_cluster_dimensions(items, set(), min_sample=5, min_dispersion=0.12) == []
+
+
+def test_split_that_would_strand_the_market_in_thin_cells_is_refused() -> None:
+    # Capacity genuinely moves the price, but with four capacities over twelve
+    # listings only one cell would be big enough to price. Better one honest wide
+    # market than a split that prices a third of it.
+    spec = [("32GB", 100, 5), ("64GB", 130, 3), ("128GB", 160, 2), ("256GB", 200, 2)]
+    items = [
+        _phone(f"{cap}-{i}", base + i, cap) for cap, base, count in spec for i in range(count)
+    ]
+    more = items + [_phone(f"64GB-x{i}", 131 + i, "64GB") for i in range(3)]
+    kwargs = {"min_sample": 5, "min_dispersion": 0.12}
+    # 5 + 6 of 15 priceable (73%) is under the 80% that must stay priceable...
+    assert choose_cluster_dimensions(more, set(), **kwargs) == []
+    # ...whereas a clean two-way split keeps everything priceable and is taken.
+    clean = [i for i in more if "32GB" in i.title or "64GB" in i.title]
+    assert choose_cluster_dimensions(clean, set(), **kwargs) == ["capacity"]

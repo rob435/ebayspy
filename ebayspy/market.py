@@ -50,6 +50,9 @@ _SPLIT_SIGNIFICANCE_Z = 2.0
 # ...and at least this share of the listings must actually state it. Splitting on
 # an attribute most titles omit would leave most of the market unpriced.
 _MIN_STATED_SHARE = 0.5
+# ...and adding it must keep at least this share of the currently priceable
+# listings priceable: a finer split is worthless if its cells are too thin.
+_MIN_COVERAGE_KEPT = 0.8
 
 
 def condition_bucket(condition: str = "", condition_id: str = "") -> str:
@@ -324,15 +327,25 @@ def variant_label(item, dimensions: Sequence[str]) -> str:
     return " · ".join(parts)
 
 
-def _dimension_spread(
+def _dimension_effect(
     items: Sequence[MarketItem], chosen: Sequence[str], dimension: str, min_sample: int
 ) -> tuple[float, bool] | None:
     """How much ``dimension`` moves the price *within* the cells already chosen.
 
-    Returns (relative spread, significant) weighted over the cells that hold at
-    least two well-populated values, or None when no cell can show it either
-    way. Testing inside cells is what stops a correlated attribute (a colour
-    that only ships on the Pro) from looking price-relevant on its own.
+    Returns (effect, significant), or None when no cell holds two well-populated
+    values and so cannot show it either way.
+
+    ``effect`` is the typical shift of a group's median from its cell's centre,
+    in log units — for two equal groups, half the log of their price ratio. It
+    is measured across *all* of a cell's groups rather than between the dearest
+    and the cheapest: the gap between extremes grows with the number of groups
+    even when nothing is going on, which is how a six-colour phone ends up
+    "priced by colour". ``significant`` asks whether that between-group variance
+    is at least four times what the sampling error of the medians alone would
+    produce. Both are pooled over cells weighted by size, so one thin cell
+    neither vetoes nor forces a split. Testing inside cells is what stops a
+    correlated attribute (a colour that only ships on the Pro) from looking
+    price-relevant on its own.
     """
     cells: dict[str, dict[str, list[float]]] = {}
     for item in items:
@@ -341,9 +354,7 @@ def _dimension_spread(
         if cell is None or not value:
             continue
         cells.setdefault(cell, {}).setdefault(value, []).append(item.total_price)
-    weighted = 0.0
-    weight = 0
-    significant = True
+    between = noise = weight = 0.0
     for groups in cells.values():
         estimates = [
             estimate
@@ -353,18 +364,25 @@ def _dimension_spread(
         ]
         if len(estimates) < 2:
             continue
-        high = max(estimates, key=lambda e: e.price)
-        low = min(estimates, key=lambda e: e.price)
-        spread = (high.price - low.price) / high.price
-        gap_se = math.hypot(high.se, low.se)
-        z = (math.log(high.price / low.price) / gap_se) if gap_se > 0 else 0.0
         size = sum(e.n for e in estimates)
-        weighted += spread * size
+        centre = sum(e.n * math.log(e.price) for e in estimates) / size
+        between += sum(e.n * (math.log(e.price) - centre) ** 2 for e in estimates)
+        noise += sum(e.n * e.se**2 for e in estimates)
         weight += size
-        significant = significant and z >= _SPLIT_SIGNIFICANCE_Z
     if not weight:
         return None
-    return weighted / weight, significant
+    return math.sqrt(between / weight), between >= _SPLIT_SIGNIFICANCE_Z**2 * noise
+
+
+def _priced_share(items: Sequence[MarketItem], dimensions: Sequence[str], min_sample: int) -> float:
+    """Of the listings that state every one of ``dimensions``, the share that
+    lands in a cluster big enough to price. (Listings that omit an attribute are
+    the stated-share rule's concern; this one is about cells being too thin.)"""
+    clusters = cluster_by_variant(items, dimensions)
+    placed = sum(len(group) for group in clusters.values())
+    if not placed:
+        return 0.0
+    return sum(len(group) for group in clusters.values() if len(group) >= min_sample) / placed
 
 
 def choose_cluster_dimensions(
@@ -379,19 +397,23 @@ def choose_cluster_dimensions(
 
     Dimensions are considered in order and each is tested *conditionally* on the
     ones already chosen. A new dimension qualifies when the query left it open,
-    at least two of its values are each well-populated (``min_sample``) inside a
-    cell, and their prices differ both materially (``min_dispersion``) and
-    significantly (beyond their standard errors). Items are then clustered by
-    the *combination* of qualifying dimensions.
+    most listings state it, its groups' prices differ both materially
+    (``min_dispersion``, the relative gap between two groups' medians) and
+    significantly, and splitting on it does not strand the market in clusters
+    too small to price. Items are then clustered by the *combination* of
+    qualifying dimensions.
 
     ``previous`` makes the choice sticky: a dimension already in use is dropped
-    only on positive evidence that it has stopped mattering (spread under half
+    only on positive evidence that it has stopped mattering (effect under half
     the threshold), never merely because this sample is too thin to show it.
     Without that, labels — and with them mutes, history and trends — would flip
     meaning from one check to the next. The one exception: a dimension that
     fewer than half the listings state is released, since holding on to it
     would leave the watch unable to price most of its market.
     """
+    # Two equal groups whose medians differ by ``min_dispersion`` each sit this
+    # far (in log units) from their common centre.
+    threshold = -math.log(1 - min(max(min_dispersion, 0.0), 0.99)) / 2
     chosen: list[str] = []
     for dimension in CLUSTER_DIMENSIONS:
         if dimension in specified or not items:
@@ -399,11 +421,17 @@ def choose_cluster_dimensions(
         stated = sum(1 for item in items if _item_variant(item, dimension)) / len(items)
         if stated < _MIN_STATED_SHARE:
             continue  # sticky or not: it cannot place most of this market
-        evidence = _dimension_spread(items, chosen, dimension, min_sample)
+        evidence = _dimension_effect(items, chosen, dimension, min_sample)
         if dimension in previous:
-            keep = evidence is None or evidence[0] >= min_dispersion / 2
+            keep = evidence is None or evidence[0] >= threshold / 2
         else:
-            keep = evidence is not None and evidence[0] >= min_dispersion and evidence[1]
+            keep = (
+                evidence is not None
+                and evidence[0] >= threshold
+                and evidence[1]
+                and _priced_share(items, [*chosen, dimension], min_sample)
+                >= _MIN_COVERAGE_KEPT * _priced_share(items, chosen, min_sample)
+            )
         if keep:
             chosen.append(dimension)
     return chosen
