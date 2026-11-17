@@ -752,3 +752,47 @@ def test_unpinned_edition_letter_is_a_variant_of_the_named_line() -> None:
     # ...and a letter on a line the query never named is another product.
     assert not is_comparable("xbox one", "Microsoft Xbox Series X 1TB Console")
     assert not is_comparable("xbox series x console", "Microsoft Xbox One X Console 1TB")
+
+
+def test_watch_for_a_part_requires_the_part_and_tolerates_part_wording() -> None:
+    # The watch names the battery: the vacuum it fits is not a comparable...
+    assert is_comparable("dyson v11 battery", "Genuine Dyson V11 Battery Click-in 970145-02")
+    assert not is_comparable("dyson v11 battery", "Dyson V11 Absolute Cordless Vacuum Cleaner")
+    assert match_verdict(
+        "dyson v11 battery", "Dyson V11 Absolute Cordless Vacuum Cleaner"
+    ).reason == "identity:missing battery"
+    # ...and "replacement" is what a part listing says, not a reason to drop it.
+    assert is_comparable("iphone 13 screen", "Genuine Apple iPhone 13 OLED Screen Replacement")
+    assert is_comparable("ps5 controller", "Sony PS5 DualSense Wireless Controller - White")
+    # A watch for the device still rejects the part.
+    assert not is_comparable("iphone 13", "Genuine Apple iPhone 13 OLED Screen Replacement")
+    assert not is_comparable("dyson v11", "Genuine Dyson V11 Battery Click-in 970145-02")
+
+
+def test_product_compatible_thing_is_the_thing() -> None:
+    assert not is_comparable(
+        "nespresso vertuo", "100 Nespresso Vertuo Compatible Coffee Pods Capsules"
+    )
+    # "compatible with <platform>" describes the product itself.
+    assert is_comparable(
+        "garmin fenix 6", "Garmin Fenix 6 GPS Smartwatch Compatible with Android and iOS"
+    )
+
+
+def test_media_rule_can_be_switched_off_by_the_caller() -> None:
+    title = "Mario Kart 8 Deluxe - Nintendo Switch Game - Brand New Sealed"
+    assert match_verdict("mario kart 8 deluxe", title).reason.startswith("media:")
+    assert is_comparable("mario kart 8 deluxe", title, allow_media=True)
+    # Only the media rule is lifted: a faulty copy is still rejected.
+    assert not is_comparable("mario kart 8 deluxe", title + " FAULTY", allow_media=True)
+    kept = filter_comparable(
+        "mario kart 8 deluxe", [title], key=lambda t: t, allow_media=True
+    )
+    assert kept == [title]
+
+
+def test_screen_as_the_query_head_noun_is_a_part_watch() -> None:
+    assert is_comparable("iphone 13 screen", "Apple iPhone 13 LCD Display Replacement Genuine")
+    assert not is_comparable("iphone 13 screen", "Apple iPhone 13 128GB Blue Unlocked")
+    # ...but only as the head noun: a device described by its screen is a device.
+    assert is_comparable("kindle 6 inch screen 2022", "Amazon Kindle 2022 6 inch Screen 16GB")

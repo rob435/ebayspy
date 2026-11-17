@@ -1203,6 +1203,21 @@ def _query_word(spec: _Spec, token: str) -> bool:
     return not _stems(token).isdisjoint(spec.stems)
 
 
+def _is_accessory_noun(word: str) -> bool:
+    """Whether a query word names an accessory or a component (so the watch is
+    for that thing, not for the device it belongs to)."""
+    stems = _stems(word)
+    return word not in _PART_CONTEXT and not (
+        stems.isdisjoint(ACCESSORY_TOKENS) and stems.isdisjoint(_INTEGRAL_COMPONENTS)
+    )
+
+
+# "screen" is too common in whole-product titles to be an accessory word, but as
+# the head noun of a query ("iphone 13 screen") it names the part being hunted.
+# Such listings call it any of these.
+_SCREEN_WORDS = frozenset({"screen", "lcd", "display", "digitizer"})
+
+
 def _locate(spec: _Spec, doc: _Doc, code_hits: dict) -> dict[str, int | None]:
     """Title position of each query content word (-1: present, no position)."""
     found: dict[str, int | None] = {}
@@ -1239,8 +1254,22 @@ def _carries(spec: _Spec, doc: _Doc, coverage: float) -> bool:
     return _coverage(spec, _locate(spec, doc, hits)) >= coverage
 
 
+# Words that only say "this is a part", expected in the title of any part a
+# watch is deliberately hunting ("iphone 13 screen" -> "... Screen Replacement").
+_PART_CONTEXT = {"replacement", "spare", "part", "accessory"}
+# "<product> compatible <thing>" sells the thing; "<product> compatible with
+# <platform>" describes the product.
+_COMPATIBLE = {"compatible", "compatibles", "kompatibel", "compatibile"}
+_WITH = {"with", "w", "mit", "con", "avec", "met"}
+
+
 def _evaluate(
-    spec: _Spec, title: str, coverage: float, fuzzy_threshold: float | None, semantic_ok: bool
+    spec: _Spec,
+    title: str,
+    coverage: float,
+    fuzzy_threshold: float | None,
+    semantic_ok: bool,
+    skip: frozenset[str] = frozenset(),
 ) -> Verdict:
     doc = _align(spec, _title_doc(title or ""))
     tokens = doc.tokens
@@ -1252,6 +1281,8 @@ def _evaluate(
 
     # 2) Listing type: lots, damage, replicas, packaging, parts, media.
     for family, detail, triggers in doc.hits:
+        if family in skip:
+            continue
         if family == "quantity" and (spec.allow_lots or detail == str(spec.lot_qty)):
             continue
         if family == "damage" and spec.damaged_ok:
@@ -1273,10 +1304,31 @@ def _evaluate(
     positions = [pos for pos in found.values() if pos is not None and pos >= 0]
     span = (min(positions), max(positions)) if positions else (len(tokens), -1)
 
+    # A watch that itself names an accessory or part ("dyson v11 battery",
+    # "ps5 controller") is hunting that thing: the noun is mandatory — the
+    # vacuum is not the battery — and wording that merely says "this is a part"
+    # is expected rather than disqualifying.
+    part_nouns = [word for word in spec.content if _is_accessory_noun(word)]
+    for word in part_nouns:
+        if found.get(word) is None:
+            return _reject(f"identity:missing {word}")
+    screen_watch = bool(spec.content) and spec.content[-1] in ("screen", "lcd")
+    if screen_watch and not any(not _stems(t).isdisjoint(_SCREEN_WORDS) for t in tokens):
+        return _reject("identity:missing screen")
+    part_watch = bool(part_nouns) or screen_watch
+
     # 4) Accessories, compatibility phrases and larger host products.
     marker = tokens[doc.compat_at] if doc.compat_at >= 0 else ""
     if doc.compat_at == 0 and marker not in spec.token_set:
         return _reject(f"accessory:{marker}-initial")  # "For Fitbit Charge 2 Band ..."
+    if (
+        doc.compat_at > 0
+        and marker in _COMPATIBLE
+        and marker not in spec.token_set
+        and doc.compat_at + 1 < len(tokens)
+        and tokens[doc.compat_at + 1] not in _WITH
+    ):
+        return _reject("accessory:compatible")  # "Nespresso Vertuo Compatible Pods"
     if doc.compat_at > 0:
         head = tokens[:doc.compat_at]
         tail_doc = _doc_from_tokens(tokens[doc.compat_at + 1:])
@@ -1292,6 +1344,8 @@ def _evaluate(
     wholes = [i for i, t in doc.wholes if not _query_word(spec, t)]
     for index, word, triggers in doc.accessories:
         if all(_query_word(spec, t) for t in triggers):
+            continue
+        if part_watch and word in _PART_CONTEXT:
             continue
         if span[0] < index < span[1]:
             continue  # inside the product's own name: "Ravensburger Mount Fuji 1000"
@@ -1478,6 +1532,7 @@ def match_verdict(
     fuzzy_threshold: float | None = None,
     semantic_ok: bool = False,
     allow_lots: bool = False,
+    allow_media: bool = False,
 ) -> Verdict:
     """Whether ``title`` is the product ``query`` names, and if not, why.
 
@@ -1485,9 +1540,17 @@ def match_verdict(
     that rejected, e.g. "accessory:for-phrase", "identity:missing 13",
     "damage:faulty", "quantity:2", "variant:capacity", "relevance:coverage 0.50".
     Guardrails can never be overridden; ``semantic_ok`` only rescues relevance.
+
+    ``allow_media`` switches off the games/books rule. A title cannot say
+    whether "… Switch Game" is media *for* the watched console or *is* the
+    watched game; the caller, which can see prices, decides (see the service).
     """
     spec = _compile(query or "", tuple(extra_excludes), allow_lots)
-    return _evaluate(spec, title, coverage, fuzzy_threshold, semantic_ok)
+    skip = _SKIP_MEDIA if allow_media else frozenset()
+    return _evaluate(spec, title, coverage, fuzzy_threshold, semantic_ok, skip)
+
+
+_SKIP_MEDIA = frozenset({"media"})
 
 
 def is_comparable(
@@ -1499,6 +1562,7 @@ def is_comparable(
     fuzzy_threshold: float | None = None,
     semantic_ok: bool = False,
     allow_lots: bool = False,
+    allow_media: bool = False,
 ) -> bool:
     """Whether ``title`` is the same product as ``query`` (see match_verdict)."""
     return match_verdict(
@@ -1509,6 +1573,7 @@ def is_comparable(
         fuzzy_threshold=fuzzy_threshold,
         semantic_ok=semantic_ok,
         allow_lots=allow_lots,
+        allow_media=allow_media,
     ).ok
 
 
@@ -1522,6 +1587,7 @@ def filter_comparable(
     fuzzy_threshold: float | None = None,
     semantic_threshold: float | None = None,
     allow_lots: bool = False,
+    allow_media: bool = False,
 ) -> list[T]:
     """Keep only the items whose title is comparable to ``query``.
 
@@ -1529,8 +1595,11 @@ def filter_comparable(
     for titles that pass every guardrail but fail lexical relevance.
     """
     spec = _compile(query or "", tuple(extra_excludes), allow_lots)
+    skip = _SKIP_MEDIA if allow_media else frozenset()
     titles = [key(item) for item in items]
-    verdicts = [_evaluate(spec, title, coverage, fuzzy_threshold, False) for title in titles]
+    verdicts = [
+        _evaluate(spec, title, coverage, fuzzy_threshold, False, skip) for title in titles
+    ]
     keep = [verdict.ok for verdict in verdicts]
     if semantic_threshold is not None:
         pending = [i for i, v in enumerate(verdicts) if v.reason.startswith("relevance")]

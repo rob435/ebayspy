@@ -2219,3 +2219,44 @@ def test_turbo_polling_is_cleared_by_a_failed_check(tmp_path: Path) -> None:
         assert watch_id not in service._auction_turbo
     finally:
         store.close()
+
+
+def test_media_word_is_judged_by_price_level(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    service = _market_service(store, ebay)
+    try:
+        # A watch for a GAME: half the listings say "Game", and cost the same as
+        # the half that don't. They are the product.
+        ebay.market_items = [
+            _market_item(f"a{i}", 34 + i, "Mario Kart 8 Deluxe (Nintendo Switch, 2017)")
+            for i in range(5)
+        ] + [
+            _market_item(f"b{i}", 35 + i, "Mario Kart 8 Deluxe - Nintendo Switch Game - Sealed")
+            for i in range(5)
+        ]
+        game = store.add_market_watch("mario kart 8 deluxe")
+        _check(service, store, game)
+        assert store.get_market_watch(game)["comparable_size"] == 10
+
+        # A watch for a CONSOLE: the games cost a fraction of it. They stay out.
+        ebay.market_items = [
+            _market_item(f"c{i}", 250 + i, "Nintendo Switch Console 32GB Neon") for i in range(8)
+        ] + [
+            _market_item(f"g{i}", 35 + i, "Zelda Breath of the Wild Nintendo Switch Game")
+            for i in range(6)
+        ]
+        console = store.add_market_watch("nintendo switch")
+        _check(service, store, console)
+        assert store.get_market_watch(console)["comparable_size"] == 8
+
+        # A watch where EVERY listing says "Book": the product is a book.
+        ebay.market_items = [
+            _market_item(f"k{i}", 9 + i * 0.2, "Atomic Habits by James Clear Paperback Book")
+            for i in range(6)
+        ]
+        book = store.add_market_watch("atomic habits")
+        _check(service, store, book)
+        assert store.get_market_watch(book)["comparable_size"] == 6
+    finally:
+        store.close()

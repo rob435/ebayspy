@@ -722,6 +722,7 @@ class EbaySpyService:
         text_ok = filter_comparable(
             row["query"], items, semantic_threshold=self._semantic_threshold(), **rules
         )
+        text_ok = self._reinstate_media(row["query"], items, text_ok, rules)
         for item in text_ok:
             if item.item_id in blocked:
                 reason = "blocked: flagged not-the-item"
@@ -758,6 +759,38 @@ class EbaySpyService:
                         "not the market's main category"
                     )
         return kept
+
+    def _reinstate_media(self, query: str, items: list, accepted: list, rules: dict) -> list:
+        """Give listings rejected only for saying "game" or "book" a second look.
+
+        On a console watch "… Switch Game" is media *for* the product; on a
+        watch for a game it *is* the product. No title rule can tell which, but
+        prices can: games trade at a fraction of the console, whereas listings
+        of the watched game cost the same whether or not their title happens to
+        say "Game". So media-flagged listings that pass every other rule are
+        taken back when they trade at the level of the accepted ones (or, when
+        nothing else was accepted, when there are enough of them to be a market).
+        """
+        taken = {id(item) for item in accepted}
+        flagged = [
+            item for item in items
+            if id(item) not in taken
+            and match_verdict(query, item.title, **rules).reason.startswith("media:")
+        ]
+        if not flagged:
+            return accepted
+        candidates = filter_comparable(query, flagged, allow_media=True, **rules)
+        level = market_price(item.total_price for item in candidates)
+        if not level:
+            return accepted
+        base = market_price(item.total_price for item in accepted)
+        if base:
+            if not 0.6 <= level / base <= 1 / 0.6:
+                return accepted
+        elif len(candidates) < self.config.market_min_sample:
+            return accepted
+        taken |= {id(item) for item in candidates}
+        return [item for item in items if id(item) in taken]
 
     def _category_consensus(self, items: list) -> list:
         """Drop listings outside the dominant category when one clearly dominates.
