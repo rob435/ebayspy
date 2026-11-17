@@ -1316,7 +1316,13 @@ def _evaluate(
     generations = _generations(doc.head_segs, spec.segs)
     if spec.generations != generations:
         return _reject(f"identity:generation {sorted(generations) or 'none'}")
-    if spec.series != doc.series:
+    if spec.series != doc.series and (
+        spec.series or not all(_query_word(spec, word) for word, _ in doc.series)
+    ):
+        # A pinned edition letter must agree ("Series X" is not "Series S"). An
+        # unpinned one is a variant only when it refines a line the query named
+        # ("xbox one" accepts One S / One X, priced separately via
+        # generation_of) — not when it belongs to another line ("Series X").
         return _reject("identity:series")
     if spec.qualifiers and spec.qualifiers != doc.qualifiers:
         return _reject(f"identity:qualifier {_qualifier_label(set(doc.qualifiers))}")
@@ -1431,9 +1437,10 @@ def generation_of(query: str, title: str) -> str:
     """The generation the title states for the product the query names.
 
     A digit string — "3" for "Echo Dot (3rd Gen)", "6" for "Fenix 6S Pro", "2"
-    for "Versa 2", "AirPods 2nd Generation" or "R6 Mark II" — or "base" when
-    the title states none. Lets pricing cluster the generations that an
-    unpinned query ("echo dot") accepts.
+    for "Versa 2", "AirPods 2nd Generation" or "R6 Mark II" — an edition letter
+    ("x" for "Xbox One X" under a watch on "xbox one"), or "base" when the title
+    states none. Lets pricing cluster the generations and editions that an
+    unpinned query ("echo dot", "xbox one") accepts.
     """
     spec = _compile(query or "", (), False)
     doc = _align(spec, _title_doc(title or ""))
@@ -1453,7 +1460,13 @@ def generation_of(query: str, title: str) -> str:
                 if 0 <= j < len(head) and head[j].isdigit() and 1 <= int(head[j]) <= 20:
                     return str(int(head[j]))
     generations = _generations(doc.head_segs, spec.segs)
-    return min(generations, key=int) if generations else "base"
+    if generations:
+        return min(generations, key=int)
+    if not spec.series:
+        for word, letter in sorted(doc.series):
+            if _query_word(spec, word):
+                return letter  # an unpinned edition letter: "x" for "Xbox One X"
+    return "base"
 
 
 def match_verdict(

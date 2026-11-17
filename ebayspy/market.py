@@ -305,7 +305,7 @@ def _label_part(dimension: str, value: str) -> str:
     """How one dimension's value reads in a label ("" when it adds nothing)."""
     if dimension in ("qualifier", "generation") and value == "base":
         return ""
-    return f"gen {value}" if dimension == "generation" else value
+    return f"gen {value}" if dimension == "generation" and value.isdigit() else value
 
 
 def variant_key(item, dimensions: Sequence[str]) -> str | None:

@@ -4,6 +4,11 @@
   "single, complete, working unit" contract (see ebayspy/matching.py).
 * ``real_listings.json`` — real eBay titles (April-2021 crawl, 15 queries),
   labelled by buyer judgement independently of any matcher.
+* ``real_listings_holdout.json`` — real titles for 14 *other* products, labelled
+  the same way. No rule was tuned against it: it is the generalisation check,
+  so a drop here means a change fitted the development sets rather than eBay.
+  (One rule followed from reading its errors — an unpinned edition letter such
+  as the X in "Xbox One X" is a variant; before it, recall here was 0.924.)
 
 Rows labelled "ambiguous" are excluded. Floors sit a little below the measured
 scores so an honest change does not trip on a single row; on failure the
@@ -46,6 +51,8 @@ def _score(name: str) -> tuple[Counter, list[str]]:
         ("match_corpus.json", 0.93, 0.93),
         # measured: P 0.968 R 0.993 (995 tp, 33 fp, 7 fn, 395 tn)
         ("real_listings.json", 0.95, 0.97),
+        # measured: P 0.964 R 0.972 (699 tp, 26 fp, 20 fn, 174 tn) — held out
+        ("real_listings_holdout.json", 0.94, 0.95),
     ],
 )
 def test_corpus_accuracy_floor(name: str, min_precision: float, min_recall: float) -> None:

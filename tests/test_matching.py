@@ -734,3 +734,21 @@ def test_semantic_load_failure_retries_after_cooldown(monkeypatch) -> None:
     clock[0] += semantic.RETRY_SECONDS + 1
     assert semantic.similarities("q", ["t"]) is None
     assert len(attempts) == 2
+
+
+def test_unpinned_edition_letter_is_a_variant_of_the_named_line() -> None:
+    from ebayspy.matching import generation_of
+
+    # "xbox one" names the line; One S and One X are editions of it — matched,
+    # and told apart for pricing by generation_of.
+    assert is_comparable("xbox one", "Microsoft Xbox One X 1TB Black Console")
+    assert is_comparable("xbox one", "Microsoft Xbox One S 500GB White Console")
+    assert generation_of("xbox one", "Microsoft Xbox One X 1TB Black Console") == "x"
+    assert generation_of("xbox one", "Microsoft Xbox One S 500GB White Console") == "s"
+    assert generation_of("xbox one", "Microsoft Xbox One 500GB Black Console") == "base"
+    # A pinned edition still has to agree...
+    assert not is_comparable("xbox one x", "Microsoft Xbox One S 500GB White Console")
+    assert is_comparable("xbox one x", "Microsoft Xbox One X 1TB Black Console")
+    # ...and a letter on a line the query never named is another product.
+    assert not is_comparable("xbox one", "Microsoft Xbox Series X 1TB Console")
+    assert not is_comparable("xbox series x console", "Microsoft Xbox One X Console 1TB")
