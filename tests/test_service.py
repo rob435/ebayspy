@@ -1763,7 +1763,7 @@ def test_ended_listings_feed_the_fair_value(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     ebay = FakeEbay([])
     title = "Sony WH-1000XM5 Headphones"
-    # Sellers are asking ~244; eight comparable listings ended last week at ~204.
+    # Sellers are asking ~244; eight comparable listings ended last week at ~226.
     ebay.market_items = [_market_item(f"a{i}", 240 + i, title) for i in range(8)]
     service = _market_service(store, ebay)
     try:
@@ -1771,7 +1771,7 @@ def test_ended_listings_feed_the_fair_value(tmp_path: Path) -> None:
         store.record_market_sightings(
             watch_id,
             [
-                (f"gone{i}", "", 200 + i, "GBP", None, title, f"old-{i}",
+                (f"gone{i}", "", 222 + i, "GBP", None, title, f"old-{i}",
                  json.dumps({"qualifier": "base"}))
                 for i in range(8)
             ],
@@ -1785,7 +1785,7 @@ def test_ended_listings_feed_the_fair_value(tmp_path: Path) -> None:
         row = store.get_market_watch(watch_id)
         # Fair value sits nearer what cleared than what is still unsold, and
         # having transaction proxies lifts confidence above asks-only (≤ 50).
-        assert 204 < row["market_price"] < 225
+        assert 226 < row["market_price"] < 236
         assert row["market_confidence"] > 50
         reply = asyncio.run(service.handle_command("chat-1", None, "/quote", str(watch_id)))
         assert "ended" in reply and "asks" in reply and "alerts at or below" in reply

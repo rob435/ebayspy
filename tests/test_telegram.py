@@ -213,3 +213,44 @@ def test_deal_notification_shows_distribution_and_comps() -> None:
         assert "🧾 Recently sold: £440.00 · £425.00 · £450.00" in text
     finally:
         asyncio.run(bot.close())
+
+
+def test_deal_notification_shows_fair_value_evidence_and_both_exits() -> None:
+    from ebayspy.pricing import Obs, fair_value
+
+    bot = _bot()
+    sent: list[str] = []
+
+    async def fake_send_photo(chat_id, image_url, caption, reply_markup=None) -> None:
+        sent.append(caption)
+
+    bot.send_photo = fake_send_photo
+    quote = fair_value(
+        [Obs(430 + i, seller=f"a{i}") for i in range(12)],
+        cleared=[Obs(400 + i, seller=f"c{i}") for i in range(9)],
+    )
+    item = MarketItem(
+        item_id="1", title="Sony WH-1000XM5 <Boxed> & More", url="https://example.test/itm/1",
+        seller="seller", currency="GBP", item_price=330.0, total_price=330.0,
+        image_url="https://example.test/i.jpg",
+    )
+    try:
+        asyncio.run(
+            bot.notify_deal(
+                "chat", item, market_price=quote.price, discount_percent=20.0,
+                query="sony wh-1000xm5", profit=30.0, roi=9.0, quote=quote, quick_profit=12.5,
+            )
+        )
+    finally:
+        asyncio.run(bot.close())
+    text = sent[0]
+    assert f"{quote.confidence}% confidence" in text and "(likely £" in text
+    assert "From 12 asking £" in text and "9 ended £" in text
+    assert "£12.50 if sold fast" in text
+    assert "&lt;Boxed&gt; &amp; More" in text  # eBay-controlled text stays escaped
+
+
+def test_truncate_html_does_not_split_an_entity() -> None:
+    text = "x" * 20 + "&amp;" + "y" * 50
+    clipped = _truncate_html(text, 24)  # would otherwise end "...&am…"
+    assert clipped.endswith("…") and "&" not in clipped

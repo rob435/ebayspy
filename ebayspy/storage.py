@@ -872,23 +872,46 @@ class Store:
     def price_trend(
         self, watch_id: int, variant: str | None, window_days: int = 7
     ) -> float | None:
-        """Percent change of the latest price vs the most recent sample at least
-        ``window_days`` old. None until that much history exists."""
-        params = (watch_id, variant or "")
-        latest = self.conn.execute(
-            "select price from market_price_history "
-            "where watch_id = ? and variant = ? order by sampled_at desc limit 1",
-            params,
-        ).fetchone()
-        baseline = self.conn.execute(
-            "select price from market_price_history "
-            "where watch_id = ? and variant = ? and sampled_at <= datetime('now', ?) "
-            "order by sampled_at desc limit 1",
-            (watch_id, variant or "", f"-{int(window_days)} days"),
-        ).fetchone()
-        if latest is None or baseline is None or not baseline["price"]:
+        """Percent change of the market over ``window_days``, or None until that
+        much history exists.
+
+        Compares the median of the last day's samples with the median of the
+        day that ended ``window_days`` ago. A watch is priced many times a day,
+        so two single samples would mostly measure the noise between them.
+        If that earlier day has no samples (the service was off), the most
+        recent sample before it stands in.
+        """
+        key = (watch_id, variant or "")
+        window = int(window_days)
+
+        def median(since: str, until: str | None) -> float | None:
+            sql = (
+                "select price from market_price_history "
+                "where watch_id = ? and variant = ? and sampled_at > datetime('now', ?)"
+            )
+            params: tuple = (*key, since)
+            if until is not None:
+                sql += " and sampled_at <= datetime('now', ?)"
+                params += (until,)
+            prices = sorted(row["price"] for row in self.conn.execute(sql, params))
+            if not prices:
+                return None
+            mid = len(prices) // 2
+            return prices[mid] if len(prices) % 2 else (prices[mid - 1] + prices[mid]) / 2
+
+        latest = median("-1 days", None)
+        baseline = median(f"-{window + 1} days", f"-{window} days")
+        if baseline is None:
+            row = self.conn.execute(
+                "select price from market_price_history "
+                "where watch_id = ? and variant = ? and sampled_at <= datetime('now', ?) "
+                "order by sampled_at desc limit 1",
+                (*key, f"-{window} days"),
+            ).fetchone()
+            baseline = row["price"] if row is not None else None
+        if latest is None or not baseline:
             return None
-        return (latest["price"] - baseline["price"]) / baseline["price"] * 100
+        return (latest - baseline) / baseline * 100
 
     def record_market_sightings(
         self, watch_id: int, sightings: list[tuple]

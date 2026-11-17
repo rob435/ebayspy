@@ -46,7 +46,7 @@ from dataclasses import dataclass
 # price regardless of sample size, and they set the evidence hierarchy:
 # sold > cleared > asks.
 ASK_BIAS_SE = 0.08
-CLEARED_BIAS_SE = 0.035
+CLEARED_BIAS_SE = 0.05
 SOLD_BIAS_SE = 0.015
 
 # Dispersion floor: five identical prices are not a zero-uncertainty market.

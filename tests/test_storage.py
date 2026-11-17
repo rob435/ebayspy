@@ -556,6 +556,18 @@ def test_price_trend(tmp_path: Path) -> None:
 
         pct = store.price_trend(watch_id, "256gb", window_days=7)
         assert pct is not None and round(pct, 1) == -10.0
+
+        # A day of samples either side: the trend compares their medians, so one
+        # freak reading on either day does not become "the market moved 50%".
+        for offset, price in (("-7 days", 398.0), ("-7 days", 402.0), ("-7 days", 800.0),
+                              ("-0 days", 358.0), ("-0 days", 180.0)):
+            store.conn.execute(
+                "insert into market_price_history(watch_id, variant, price, sampled_at) "
+                "values (?, ?, ?, datetime('now', ?, '-1 hours'))",
+                (watch_id, "256gb", price, offset),
+            )
+        pct = store.price_trend(watch_id, "256gb", window_days=7)
+        assert pct is not None and round(pct, 1) == -10.9  # 358 vs 402
     finally:
         store.close()
 
