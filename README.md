@@ -222,6 +222,40 @@ each source are priors, not measurements from your market. And none of this has 
 what the matcher gets wrong: a watch that matches the wrong items prices the wrong market,
 which is why `/quote` shows the comparable counts.
 
+## How accurate is it
+
+Measured by replaying real eBay searches through the production pipeline and checking every
+listing against a human label (`tests/data/`, `tests/test_real_dryrun.py`). The listings are
+a public crawl of eBay.com from April 2021: 29 product searches, 2,432 listings, each
+hand-labelled as "is this a single working unit of the product, yes or no".
+
+| | Before this work | Now |
+| --- | --- | --- |
+| Listings correctly kept / dropped — 15 searches used to develop the rules (precision / recall) | 0.85 / 0.90 | 0.97 / 0.99 |
+| Same — 14 **held-out** searches no rule was tuned on | 0.88 / 0.90 | 0.96 / 0.97 |
+| Alerts that were not the product — development searches | 30 of 213 | 5 of 167 |
+| Alerts that were not the product — **held-out** searches | 22 of 145 | 4 of 97 |
+| Fair value's distance from a perfect-matcher quote, mean — development / held-out | 20% with the old matcher / not measured | 4% / 11% |
+
+What those numbers do and don't say:
+
+- The before/after gap is mostly the matcher. In accessory-heavy searches the old one priced
+  the wrong thing entirely (a watch on `garmin fenix` was priced off £7 straps).
+- Held-out recall was 0.92 before one rule that came from reading that set's errors (an
+  unpinned edition letter — the X in "Xbox One X" — is a variant); every other figure in that
+  row is untouched by it.
+- The labels are one labeller's judgement per row; the crawl is US electronics from 2021 and
+  carries no category, shipping, seller-name or sold data. Other categories are covered only
+  by unit tests and spot checks, not by a labelled corpus — run `ebayspy dryrun` on your own
+  watches before trusting them.
+- "Not the product" is checkable; "a good deal" is not. Even with a perfect matcher, about a
+  quarter of real listings sit 15% or more below their market's centre, which is why a flat
+  percentage rule over-alerts and why the confidence gate exists. Nothing here proves that
+  the deals it keeps are the profitable ones.
+- The wrong alerts that remain are mostly things only eBay's category can tell apart (a
+  collector's-edition game priced like the console) — in production the category-consensus
+  screen sees that; this crawl has no categories, so the figures above are without it.
+
 ## Dry runs
 
 `ebayspy dryrun` prices one market and shows the working, without sending an alert or

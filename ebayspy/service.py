@@ -2116,10 +2116,18 @@ class EbaySpyService:
                 f" from {len(snap.fixed)} comparable of {len(snap.items)} listings sampled."
             )
         suggestion = ""
+        if fair.sigma >= 0.30:
+            # A spread this wide is rarely one product: say so rather than let a
+            # precise-looking number stand in for a mixed market.
+            suggestion += (
+                f" Prices here vary a lot (±{fair.sigma * 100:.0f}%), which usually means "
+                "several different products — name the model, generation or condition "
+                "for a tighter price."
+            )
         if not row["category_id"]:
             cat_id, cat_name, share = self._dominant_category(snap.comparable)
             if cat_id and share >= 0.6:
-                suggestion = f" Tip: most are in “{cat_name}” — add category:{cat_id} to cut noise."
+                suggestion += f" Tip: most are in “{cat_name}” — add category:{cat_id} to cut noise."
         return headline + " I'll alert as deals appear. /quote " + f"{watch_id} shows the working." + suggestion
 
     async def _handle_quote(self, arg: str) -> str:
