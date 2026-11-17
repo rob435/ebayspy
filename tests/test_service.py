@@ -2001,3 +2001,73 @@ def test_quote_command_usage_and_unknown_id(tmp_path: Path) -> None:
         )
     finally:
         store.close()
+
+
+def test_price_drop_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    # A drop whose alert could not be delivered must still look like a drop on
+    # the next poll; overwriting the stored price would silently lose it.
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FlakyTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        item = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                       price="GBP 100.00", url="https://example.test/itm/111111111111")
+        store.mark_seen(item, notified=False)
+        store.upsert_active_listings([item])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+        cheaper = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                          price="GBP 80.00", url="https://example.test/itm/111111111111")
+        service.ebay = FakeEbay([cheaper])
+
+        assert asyncio.run(service.check_once()) == 0  # Telegram down
+        service.telegram.fail = False
+        assert asyncio.run(service.check_once()) == 1  # retried, not lost
+        assert service.telegram.price_drops == [("chat-1", "111111111111", 100.0, 80.0)]
+        assert asyncio.run(service.check_once()) == 0  # and then deduped as usual
+    finally:
+        store.close()
+
+
+def test_poll_where_every_seller_fails_is_not_recorded_as_healthy(tmp_path: Path) -> None:
+    import httpx
+
+    class TimingOut(FakeEbay):
+        async def seller_listings(self, seller: str, *, hydrate: bool = True) -> list[Listing]:
+            raise httpx.ReadTimeout("")  # str() of this is empty
+
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.telegram = FakeTelegram()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        service.ebay = TimingOut([])
+        asyncio.run(service.check_once())
+        assert store.get_meta("last_poll_ok_at") is None  # /health must not say "healthy"
+        assert store.status_rows()[0]["last_error"] == "ReadTimeout"  # nor /status "ok"
+        service.ebay = FakeEbay([])
+        asyncio.run(service.check_once())
+        assert store.get_meta("last_poll_ok_at")
+    finally:
+        store.close()
+
+
+def test_rename_probe_runs_at_most_daily(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        assert service._rename_probe_due("Seller_One") is True
+        assert service._rename_probe_due("seller_one") is False  # same seller, same day
+        stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        store.set_meta("seller_rename_probe_at:seller_one", stale)
+        assert service._rename_probe_due("seller_one") is True
+    finally:
+        store.close()

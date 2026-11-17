@@ -1232,7 +1232,19 @@ class Store:
         )
         self.conn.commit()
 
-    def upsert_active_listings(self, listings: list[Listing]) -> None:
+    def upsert_active_listings(
+        self,
+        listings: list[Listing],
+        *,
+        keep_price: frozenset[str] | set[str] = frozenset(),
+        keep_quantity: frozenset[str] | set[str] = frozenset(),
+    ) -> None:
+        """Refresh the stored snapshot of a seller's active listings.
+
+        ``keep_price`` / ``keep_quantity`` name items whose price-drop or restock
+        alert could not be delivered: their previous value is left in place so
+        the next poll still sees the change and retries the alert.
+        """
         self.conn.executemany(
             """
             insert into active_items(
@@ -1257,14 +1269,15 @@ class Store:
             on conflict(item_id) do update set
                 seller = excluded.seller,
                 title = excluded.title,
-                price = excluded.price,
+                price = case when ? then active_items.price else excluded.price end,
                 url = excluded.url,
                 description = excluded.description,
                 listed_at = excluded.listed_at,
                 image_url = excluded.image_url,
                 listing_type = excluded.listing_type,
                 category = excluded.category,
-                quantity_available = excluded.quantity_available,
+                quantity_available = case when ? then active_items.quantity_available
+                                          else excluded.quantity_available end,
                 seller_feedback_percent = excluded.seller_feedback_percent,
                 seller_feedback_score = excluded.seller_feedback_score,
                 last_seen_at = current_timestamp,
@@ -1286,6 +1299,8 @@ class Store:
                     item.quantity_available,
                     item.seller_feedback_percent,
                     item.seller_feedback_score,
+                    item.item_id in keep_price,
+                    item.item_id in keep_quantity,
                 )
                 for item in listings
             ],

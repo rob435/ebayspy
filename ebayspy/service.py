@@ -251,7 +251,10 @@ class EbaySpyService:
 
     def _record_poll_health(self, alert_count: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self.store.set_meta("last_poll_ok_at", now)
+        # A poll in which every seller errored is not a healthy poll: leave the
+        # "last ok" stamp alone so /health and the heartbeat show the outage.
+        if not getattr(self, "_poll_all_failed", False):
+            self.store.set_meta("last_poll_ok_at", now)
         self.store.set_meta("last_poll_alert_count", str(alert_count))
         if alert_count > 0:
             self.store.set_meta("last_alert_at", now)
@@ -295,6 +298,8 @@ class EbaySpyService:
             log.warning("No Telegram chats configured yet. Send /start to the bot.")
 
         total_alert_count = 0
+        failed_sellers = 0
+        self._poll_all_failed = False
         for seller_index, seller in enumerate(sellers):
             if seller_index and self.config.seller_check_delay_seconds > 0:
                 try:
@@ -316,6 +321,8 @@ class EbaySpyService:
                     seller, listing_count=0, new_count=0,
                     error=str(exc) or exc.__class__.__name__,
                 )
+                failed_sellers += 1
+                self._poll_all_failed = failed_sellers == len(sellers)
                 continue
 
             current_seller = await self._detect_username_change(seller, listings, chats)
@@ -347,6 +354,10 @@ class EbaySpyService:
                 # starts fresh rather than being flooded with the whole backlog.
                 self.store.mark_seen(listing, notified=notified)
 
+            # Items whose restock / price-drop alert failed to send keep their old
+            # stored value, so the next poll sees the change again and retries.
+            undelivered_restock: set[str] = set()
+            undelivered_drop: set[str] = set()
             if not first_scan:
                 for listing, previous_quantity, current_quantity in (
                     self.store.quantity_increase_candidates(listings)
@@ -358,6 +369,8 @@ class EbaySpyService:
                     )
                     if sent:
                         total_alert_count += 1
+                    elif chats:
+                        undelivered_restock.add(listing.item_id)
 
                 # Price drops are read BEFORE upsert_active_listings overwrites the
                 # stored price; the floor is recorded only on a successful send so a
@@ -375,6 +388,8 @@ class EbaySpyService:
                     if sent:
                         self.store.mark_price_drop_alerted(listing.item_id, new_price)
                         total_alert_count += 1
+                    elif chats:
+                        undelivered_drop.add(listing.item_id)
 
                 if not listings_truncated:
                     for listing, last_seen_at in self.store.ended_candidates(
@@ -410,7 +425,9 @@ class EbaySpyService:
                             # a failed send is retried on the next poll.
                             self.store.mark_ended_notified(listing.item_id)
 
-            self.store.upsert_active_listings(listings)
+            self.store.upsert_active_listings(
+                listings, keep_price=undelivered_drop, keep_quantity=undelivered_restock
+            )
             self.store.record_check(seller, len(listings), seller_new_count, seller_ended_count)
             log.info(
                 "Checked %s: %s active listings, %s new alerted, %s ended alerted",
@@ -1352,7 +1369,7 @@ class EbaySpyService:
         self, watched_seller: str, listings: list[Listing], chats: list[str]
     ) -> str | None:
         observed = self._observed_changed_seller(watched_seller, listings)
-        if not observed and not listings:
+        if not observed and not listings and self._rename_probe_due(watched_seller):
             observed = await self._probe_current_seller_from_known_items(watched_seller)
         if not observed:
             return None
@@ -1371,6 +1388,21 @@ class EbaySpyService:
                 self.store.set_meta(notice_key, "sent")
             log.info("Detected possible seller username change: %s -> %s", watched_seller, observed)
         return observed
+
+    def _rename_probe_due(self, seller: str) -> bool:
+        """Whether to spend getItem calls checking an empty seller for a rename.
+
+        A seller with nothing listed looks the same on every poll, so probing
+        each time burns hundreds of calls a day for no new information; once a
+        day is enough to catch a rename.
+        """
+        key = f"seller_rename_probe_at:{seller.lower()}"
+        last = _parse_iso_utc(self.store.get_meta(key) or "")
+        now = datetime.now(timezone.utc)
+        if last is not None and (now - last).total_seconds() < 86400:
+            return False
+        self.store.set_meta(key, now.isoformat())
+        return True
 
     def _observed_changed_seller(self, watched_seller: str, listings: list[Listing]) -> str | None:
         watched = watched_seller.lower()
