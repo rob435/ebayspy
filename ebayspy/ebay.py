@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -62,6 +63,31 @@ class EbayRateLimited(RuntimeError):
     """eBay answered 429 (or we are still backing off from one)."""
 
 
+class MarketSample(list):
+    """Search results plus ``total``, the number of listings eBay says match
+    (None if it did not say). ``total > len(sample)`` means the sample is a
+    window onto a bigger market."""
+
+    total: int | None = None
+
+
+def _retry_after_seconds(header: str | None) -> float:
+    """Seconds to back off for a Retry-After header, which may be a number of
+    seconds or an HTTP date; clamped to a sane range."""
+    wait = _to_float(header)
+    if wait is None and header:
+        try:
+            when = parsedate_to_datetime(header)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            wait = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            wait = None
+    if wait is None:
+        wait = _DEFAULT_RETRY_AFTER_SECONDS
+    return min(max(wait, 1.0), _MAX_RETRY_AFTER_SECONDS)
+
+
 def _to_float(value: object) -> float | None:
     try:
         return float(value)  # type: ignore[arg-type]
@@ -91,10 +117,15 @@ class EbayClient:
         self.global_id = global_id
         self.max_items = max_items
         self.detail_concurrency = max(1, detail_concurrency)
+        # Optional tap on raw search payloads (the dry run records them for replay).
+        self.on_search = None
         self._oauth_tokens: dict[str, tuple[str, float]] = {}
         # item_id -> (expires_at monotonic, detail fields or None for a failure)
         self._detail_cache: dict[str, tuple[float, dict | None]] = {}
-        self._backoff_until = 0.0
+        # OAuth scope -> monotonic time until which calls fail fast. Per scope:
+        # Marketplace Insights has its own (smaller) quota, and running out of
+        # it must not silence the Browse calls that seller monitoring needs.
+        self._backoff_until: dict[str, float] = {}
         self.client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={
@@ -184,7 +215,7 @@ class EbayClient:
           then instead of spending more calls to be told no;
         * 5xx — a transient gateway error: one short retry.
         """
-        if time.monotonic() < self._backoff_until:
+        if time.monotonic() < self._backoff_until.get(scope, 0.0):
             raise EbayRateLimited("eBay API rate limit hit; backing off")
         response = None
         for attempt in range(2):
@@ -194,12 +225,8 @@ class EbayClient:
                 self._oauth_tokens.pop(scope, None)
                 continue
             if response.status_code == 429:
-                retry_after = _to_float(response.headers.get("Retry-After"))
-                wait = min(
-                    max(retry_after or _DEFAULT_RETRY_AFTER_SECONDS, 1.0),
-                    _MAX_RETRY_AFTER_SECONDS,
-                )
-                self._backoff_until = time.monotonic() + wait
+                wait = _retry_after_seconds(response.headers.get("Retry-After"))
+                self._backoff_until[scope] = time.monotonic() + wait
                 raise EbayRateLimited(f"eBay API rate limit hit; backing off {wait:.0f}s")
             if response.status_code >= 500 and attempt == 0:
                 await asyncio.sleep(0.5)
@@ -219,7 +246,7 @@ class EbayClient:
         include_auctions: bool = False,
         category_ids: str | None = None,
         marketplace: str | None = None,
-    ) -> list[MarketItem]:
+    ) -> MarketSample:
         """Sample live listings matching a keyword query.
 
         Defaults to eBay Best Match (``sort=None``), which ranks the actual
@@ -258,11 +285,15 @@ class EbayClient:
                 f"{self._error_text(response)}"
             )
         payload = response.json()
-        items = [
-            self._market_item_from_summary(summary, currency)
+        if self.on_search is not None:
+            self.on_search(query, payload)
+        sample = MarketSample(
+            item
             for summary in payload.get("itemSummaries") or []
-        ]
-        return [item for item in items if item is not None]
+            if (item := self._market_item_from_summary(summary, currency)) is not None
+        )
+        sample.total = _to_int(payload.get("total"))
+        return sample
 
     async def seller_exists(self, seller: str) -> bool | None:
         try:

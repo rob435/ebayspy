@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Sequence
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from . import semantic
 
@@ -552,3 +552,13 @@ def accepts_damaged(query: str) -> bool:
     return bool(tokens & DAMAGE_TOKENS) or any(
         f" {phrase} " in norm for phrase in ("for parts", "for spares", "spares or repair")
     )
+
+
+class Verdict(NamedTuple):
+    ok: bool
+    reason: str
+
+
+def match_verdict(query: str, title: str, **kwargs) -> Verdict:
+    ok = is_comparable(query, title, **kwargs)
+    return Verdict(ok, "ok" if ok else "not comparable")

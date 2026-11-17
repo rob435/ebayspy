@@ -47,6 +47,9 @@ TRIM_HIGH_RATIO = pricing.BAND_HIGH
 # A new dimension must separate its groups by at least this many standard errors
 # (as well as by ``min_dispersion``) before the market is split on it.
 _SPLIT_SIGNIFICANCE_Z = 2.0
+# ...and at least this share of the listings must actually state it. Splitting on
+# an attribute most titles omit would leave most of the market unpriced.
+_MIN_STATED_SHARE = 0.5
 
 
 def condition_bucket(condition: str = "", condition_id: str = "") -> str:
@@ -377,12 +380,17 @@ def choose_cluster_dimensions(
     only on positive evidence that it has stopped mattering (spread under half
     the threshold), never merely because this sample is too thin to show it.
     Without that, labels — and with them mutes, history and trends — would flip
-    meaning from one check to the next.
+    meaning from one check to the next. The one exception: a dimension that
+    fewer than half the listings state is released, since holding on to it
+    would leave the watch unable to price most of its market.
     """
     chosen: list[str] = []
     for dimension in CLUSTER_DIMENSIONS:
-        if dimension in specified:
+        if dimension in specified or not items:
             continue
+        stated = sum(1 for item in items if _item_variant(item, dimension)) / len(items)
+        if stated < _MIN_STATED_SHARE:
+            continue  # sticky or not: it cannot place most of this market
         evidence = _dimension_spread(items, chosen, dimension, min_sample)
         if dimension in previous:
             keep = evidence is None or evidence[0] >= min_dispersion / 2

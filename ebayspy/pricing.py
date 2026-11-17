@@ -22,7 +22,8 @@ Each source is reduced to a robust location with a standard error:
      bulk lister cannot set "the market" alone;
   2. the centre is a weighted median, the spread a weighted MAD in log space
      (prices are multiplicative), and observations beyond 3 robust sigmas — or
-     outside a hard 0.4×–2.5× band — are clipped iteratively;
+     outside a hard 0.4×–2.5× band — are clipped. The spread is shrunk toward
+     a prior, so a source with one or two rows cannot claim to be precise;
   3. the standard error is the sampling error of a median over the *effective*
      sample size, plus a per-source systematic term for how far that kind of
      evidence can sit from the true clearing price however many rows there are.
@@ -51,6 +52,15 @@ SOLD_BIAS_SE = 0.015
 
 # Dispersion floor: five identical prices are not a zero-uncertainty market.
 MIN_SIGMA = 0.03
+# A spread measured from a handful of prices is itself a guess. It is shrunk
+# toward this prior as if the prior were PRIOR_WEIGHT extra observations, so one
+# or two rows (whose measured spread is zero) do not masquerade as a tight market.
+PRIOR_SIGMA = 0.15
+PRIOR_WEIGHT = 3.0
+# A source needs this much effective evidence before it may move a fair value
+# that better-supported sources already pin down: one or two ended listings are
+# an anecdote, not a market.
+MIN_SOURCE_SUPPORT = 3.0
 # Robust-sigma clip, and the hard ratio band it can never exceed.
 CLIP_Z = 3.0
 BAND_LOW = 0.4
@@ -86,6 +96,7 @@ class Estimate:
     se: float  # standard error of ``price`` incl. systematic term, log units
     n: int  # observations kept after clipping
     n_eff: float  # effective sample size after weighting
+    sampling_se: float = 0.0  # the part of ``se`` that more data would shrink
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,7 @@ class FairValue:
     sigma: float  # market dispersion around fair, log units
     n: int  # total observations behind the estimate
     components: tuple[Estimate, ...] = ()
+    sampling_se: float = 0.0  # the part of ``se`` that more data would shrink
 
     @property
     def low(self) -> float:
@@ -113,9 +125,12 @@ class FairValue:
 
     @property
     def predictive_sd(self) -> float:
-        """Log-sd of one listing's price around our estimate: market noise plus
-        our own estimation error. The yardstick for "is this cheap, or noise?"."""
-        return math.hypot(self.sigma, self.se)
+        """Log-sd of one listing's price around the centre of its market: the
+        market's own scatter plus the sampling error of that centre. The
+        yardstick for "is this cheap, or noise?". The systematic term is left
+        out on purpose — it is about how far asking prices sit from sale
+        prices, which says nothing about whether one ask is low among asks."""
+        return math.hypot(self.sigma, self.sampling_se)
 
     def component(self, source: str) -> Estimate | None:
         return next((c for c in self.components if c.source == source), None)
@@ -169,25 +184,23 @@ def robust_estimate(
     pairs = _seller_weighted(observations)
     if not pairs:
         return None
+    # The clip width comes from the WHOLE sample once (a MAD shrugs off up to
+    # half the points being strays). Re-estimating it from the survivors each
+    # round would ratchet inward on a two-humped sample and clip the market.
+    centre = weighted_quantile(pairs, 0.5)
+    reach = CLIP_Z * _shrunk_sigma(pairs, centre)
+    low = max(math.log(BAND_LOW), -reach)
+    high = min(math.log(BAND_HIGH), reach)
     kept = pairs
-    centre = sigma = 0.0
-    for _ in range(5):
+    for _ in range(2):  # clip, re-centre on the survivors, clip once more
+        kept = [(p, w) for p, w in pairs if low <= math.log(p / centre) <= high] or kept
         centre = weighted_quantile(kept, 0.5)
-        deviations = [(abs(math.log(p / centre)), w) for p, w in kept]
-        sigma = max(MIN_SIGMA, _MAD_TO_SIGMA * weighted_quantile(deviations, 0.5))
-        # A spread measured from a handful of points is itself uncertain, so the
-        # clip widens at small n rather than throwing away a third of the sample.
-        reach = CLIP_Z * (1 + 3 / len(kept)) * sigma
-        low = max(math.log(BAND_LOW), -reach)
-        high = min(math.log(BAND_HIGH), reach)
-        clipped = [(p, w) for p, w in pairs if low <= math.log(p / centre) <= high]
-        if not clipped or clipped == kept:
-            break
-        kept = clipped
+    sigma = _shrunk_sigma(kept, centre)
     weight_sum = sum(w for _, w in kept)
     # Effective sample size. Kish's formula accounts for unequal (recency)
     # weights; the plain weight sum accounts for one seller's listings not being
-    # independent (k of them count as √k). Take whichever is more conservative.
+    # independent (k of them count as √k) and for old evidence counting for
+    # less. Take whichever is more conservative.
     n_eff = min(weight_sum**2 / sum(w * w for _, w in kept), weight_sum)
     # One degree of freedom is spent locating the centre; this also keeps a
     # single observation from claiming a finite sampling error it cannot have.
@@ -199,7 +212,17 @@ def robust_estimate(
         se=math.hypot(sampling_se, bias_se),
         n=len(kept),
         n_eff=n_eff,
+        sampling_se=sampling_se,
     )
+
+
+def _shrunk_sigma(pairs: Sequence[tuple[float, float]], centre: float) -> float:
+    """Robust log-spread of ``pairs`` around ``centre``, shrunk toward the prior."""
+    deviations = [(abs(math.log(p / centre)), w) for p, w in pairs]
+    measured = _MAD_TO_SIGMA * weighted_quantile(deviations, 0.5)
+    support = min(sum(w for _, w in pairs), float(len(pairs)))
+    variance = (support * measured**2 + PRIOR_WEIGHT * PRIOR_SIGMA**2) / (support + PRIOR_WEIGHT)
+    return max(MIN_SIGMA, math.sqrt(variance))
 
 
 def fuse(estimates: Iterable[Estimate | None]) -> FairValue | None:
@@ -207,9 +230,12 @@ def fuse(estimates: Iterable[Estimate | None]) -> FairValue | None:
     parts = [e for e in estimates if e is not None and e.n > 0 and e.se > 0]
     if not parts:
         return None
+    supported = [e for e in parts if e.n_eff >= MIN_SOURCE_SUPPORT]
+    if supported:  # thin sources only count when there is nothing better
+        parts = supported
     if len(parts) == 1:  # nothing to fuse: keep the source's exact centre
         only = parts[0]
-        return FairValue(only.price, only.se, only.sigma, only.n, (only,))
+        return FairValue(only.price, only.se, only.sigma, only.n, (only,), only.sampling_se)
     weights = [1.0 / (e.se * e.se) for e in parts]
     total = sum(weights)
     mean = sum(w * math.log(e.price) for w, e in zip(weights, parts)) / total
@@ -220,12 +246,14 @@ def fuse(estimates: Iterable[Estimate | None]) -> FairValue | None:
         variance *= max(1.0, chi2 / (len(parts) - 1))
     asks = next((e for e in parts if e.source == "asks"), None)
     sigma = asks.sigma if asks is not None else max(e.sigma for e in parts)
+    sampling = math.sqrt(sum((w * e.sampling_se) ** 2 for w, e in zip(weights, parts))) / total
     return FairValue(
         price=math.exp(mean),
         se=math.sqrt(variance),
         sigma=sigma,
         n=sum(e.n for e in parts),
         components=tuple(parts),
+        sampling_se=sampling,
     )
 
 

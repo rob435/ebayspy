@@ -396,3 +396,39 @@ def test_market_item_carries_condition_id() -> None:
         assert client._market_item_from_summary(summary, "USD").condition_id == "7000"
     finally:
         asyncio.run(client.close())
+
+
+def test_rate_limit_breaker_is_per_scope_and_reads_http_dates() -> None:
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from ebayspy.ebay import _retry_after_seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 7200})
+        if "marketplace_insights" in request.url.path:
+            return httpx.Response(429, headers={"Retry-After": "600"}, json={})
+        return httpx.Response(200, json={"itemSummaries": [], "total": 0})
+
+    client = _transport_client(handler)
+    try:
+        try:
+            asyncio.run(client.search_item_sales("thing"))
+        except EbayRateLimited:
+            pass
+        else:
+            raise AssertionError("expected EbayRateLimited")
+        # Insights ran out of quota; Browse (seller monitoring, market search) carries on.
+        sample = asyncio.run(client.search_market("thing"))
+        assert sample == [] and sample.total == 0
+    finally:
+        asyncio.run(client.close())
+
+    assert _retry_after_seconds("120") == 120
+    assert _retry_after_seconds("0") == 1  # never a zero-length breaker
+    assert _retry_after_seconds(None) == 60
+    assert _retry_after_seconds("garbage") == 60
+    assert _retry_after_seconds("99999") == 900  # clamped
+    in_five = format_datetime(datetime.now(timezone.utc) + timedelta(minutes=5), usegmt=True)
+    assert 290 <= _retry_after_seconds(in_five) <= 300

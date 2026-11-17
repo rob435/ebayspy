@@ -177,6 +177,7 @@ class Store:
                 title text,
                 seller text,
                 attrs text,
+                ended_confirmed integer,
                 primary key (watch_id, item_id)
             );
             create index if not exists idx_market_listings
@@ -276,6 +277,8 @@ class Store:
         for column in ("title", "seller", "attrs"):
             if column not in listing_columns:
                 self.conn.execute(f"alter table market_listings add column {column} text")
+        if "ended_confirmed" not in listing_columns:
+            self.conn.execute("alter table market_listings add column ended_confirmed integer")
         alert_columns = self._table_columns("market_deal_alerts")
         alert_defaults = {
             "variant": "text",
@@ -953,7 +956,8 @@ class Store:
                 title = coalesce(excluded.title, market_listings.title),
                 seller = coalesce(excluded.seller, market_listings.seller),
                 attrs = coalesce(excluded.attrs, market_listings.attrs),
-                ended_at = null
+                ended_at = null,
+                ended_confirmed = null
             """,
             rows,
         )
@@ -962,9 +966,9 @@ class Store:
     def disappeared_candidates(
         self, watch_id: int, seen_item_ids: set[str], grace_seconds: int, limit: int
     ) -> list[str]:
-        """Listings absent beyond the grace period and not yet marked ended,
-        longest-absent first — the ones worth confirming with a getItem when the
-        sample is only a window onto a larger market."""
+        """Listings absent beyond the grace period whose fate has not been
+        confirmed either way, most recently seen first (the freshest endings are
+        the most useful price evidence) — the ones worth a getItem."""
         if limit <= 0:
             return []
         placeholders = ",".join("?" for _ in seen_item_ids) or "''"
@@ -972,10 +976,10 @@ class Store:
             f"""
             select item_id from market_listings
             where watch_id = ?
-              and ended_at is null
+              and ended_confirmed is null
               and last_seen_at < datetime('now', ?)
               and item_id not in ({placeholders})
-            order by last_seen_at
+            order by last_seen_at desc
             limit ?
             """,
             (watch_id, f"-{int(grace_seconds)} seconds", *seen_item_ids, int(limit)),
@@ -983,27 +987,44 @@ class Store:
         return [row["item_id"] for row in rows]
 
     def resolve_disappeared_listing(self, watch_id: int, item_id: str, ended: bool) -> None:
-        """Record a getItem verdict: ended (stamp it at its last sighting) or
-        still live (refresh the sighting so it is not re-checked for a grace)."""
+        """Record a getItem verdict on a listing that left the sample.
+
+        Ended: stamp it at its last sighting and mark it confirmed — only such
+        rows count as price evidence. Still live: it merely fell out of view (a
+        window onto a bigger market, or a changed filter), so it is neither
+        ended nor active, and is not asked about again unless it reappears.
+        """
         if ended:
             self.conn.execute(
-                "update market_listings set ended_at = last_seen_at "
-                "where watch_id = ? and item_id = ? and ended_at is null",
+                "update market_listings "
+                "set ended_at = coalesce(ended_at, last_seen_at), ended_confirmed = 1 "
+                "where watch_id = ? and item_id = ?",
                 (watch_id, item_id),
             )
         else:
             self.conn.execute(
-                "update market_listings set last_seen_at = current_timestamp "
+                "update market_listings set ended_at = null, ended_confirmed = 0 "
                 "where watch_id = ? and item_id = ?",
                 (watch_id, item_id),
             )
         self.conn.commit()
 
+    def clear_suppressed_deals(self, watch_id: int) -> None:
+        """Forget photo-based rejections (the reference image they were judged
+        against has changed, so the verdicts no longer stand)."""
+        self.conn.execute(
+            "delete from market_deal_alerts where watch_id = ? and stage = 'suppressed'",
+            (watch_id,),
+        )
+        self.conn.commit()
+
     def cleared_listings(self, watch_id: int, window_days: int) -> list[sqlite3.Row]:
-        """Listings that ended within the window, with their last asking price —
-        the transaction proxies behind the fair value. Only rows that carry
-        ``attrs`` qualify, so they can be re-labelled (and re-validated against
-        the current matcher) rather than trusted on a label from another era."""
+        """Listings CONFIRMED ended within the window, with their last asking
+        price — the transaction proxies behind the fair value. Absence from a
+        sample is not enough (a changed filter makes live listings vanish too).
+        Only rows that carry ``attrs`` qualify, so they can be re-labelled (and
+        re-validated against the current matcher) rather than trusted on a
+        label from another era."""
         if window_days <= 0:
             return []
         return self.conn.execute(
@@ -1014,6 +1035,7 @@ class Store:
             where watch_id = ?
               and ended_at is not null
               and ended_at >= datetime('now', ?)
+              and ended_confirmed = 1
               and price is not null and price > 0
               and attrs is not null
             """,
@@ -1034,6 +1056,7 @@ class Store:
             update market_listings set ended_at = last_seen_at
             where watch_id = ?
               and ended_at is null
+              and ended_confirmed is null
               and last_seen_at < datetime('now', ?)
               and item_id not in ({placeholders})
             """,

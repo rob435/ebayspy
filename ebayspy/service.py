@@ -41,6 +41,7 @@ from .matching import (
     content_tokens,
     filter_comparable,
     lot_quantity,
+    match_verdict,
     register_aliases,
     specified_dimensions,
     tokenize,
@@ -108,15 +109,21 @@ class _Snapshot:
     quotes: dict[str, pricing.FairValue] = field(default_factory=dict)
     sold_tag: str | None = None  # real sales-velocity read, when available
     comps: dict[str, list[float]] = field(default_factory=dict)  # recent sold prices
+    rejected: dict[str, str] = field(default_factory=dict)  # item_id -> why (dry run)
 
 
 class EbaySpyService:
-    def __init__(self, config: Config) -> None:
-        config.require_telegram()
-        config.require_ebay()
+    def __init__(self, config: Config, *, store=None, ebay=None, telegram=None) -> None:
+        """Wire the service. Collaborators can be injected (a dry run uses an
+        in-memory store, a replayed or live eBay client and a recording
+        Telegram); credentials are only required for the ones built here."""
+        if telegram is None:
+            config.require_telegram()
+        if ebay is None:
+            config.require_ebay()
         self.config = config
-        self.store = Store(config.sqlite_path)
-        self.ebay = EbayClient(
+        self.store = store if store is not None else Store(config.sqlite_path)
+        self.ebay = ebay if ebay is not None else EbayClient(
             app_id=config.ebay_app_id,
             client_secret=config.ebay_client_secret,
             global_id=config.ebay_global_id,
@@ -124,7 +131,7 @@ class EbaySpyService:
             max_items=config.max_items_per_seller,
             detail_concurrency=config.detail_concurrency,
         )
-        self.telegram = TelegramBot(
+        self.telegram = telegram if telegram is not None else TelegramBot(
             config.telegram_bot_token,
             config.http_timeout_seconds,
             config.ebay_global_id,
@@ -687,34 +694,64 @@ class EbaySpyService:
         raw = row["exclude_terms"] or ""
         return [term.strip() for term in raw.split(",") if term.strip()]
 
-    def _comparable(self, row, items: list, *, allow_lots: bool = False) -> list:
+    def _comparable(
+        self,
+        row,
+        items: list,
+        *,
+        allow_lots: bool = False,
+        rejected: dict[str, str] | None = None,
+    ) -> list:
         """Listings that are the watched product: the title matcher, minus what
         the user blocked, minus for-parts units (unless the watch hunts them),
-        minus strays from outside the product's dominant eBay category."""
+        minus strays from outside the product's dominant eBay category.
+
+        Pass ``rejected`` to have it filled with item_id -> why each dropped
+        listing was dropped (used by the dry run; costs nothing otherwise).
+        """
+        rules = {
+            "extra_excludes": self._watch_exclude_terms(row),
+            "coverage": self.config.market_match_coverage,
+            "fuzzy_threshold": self.config.market_fuzzy_threshold,
+            "allow_lots": allow_lots,
+        }
         blocked = self.store.blocked_item_ids(row["id"])
         wants_damaged = accepts_damaged(row["query"])
-        matched = [
-            item
-            for item in filter_comparable(
-                row["query"],
-                items,
-                extra_excludes=self._watch_exclude_terms(row),
-                coverage=self.config.market_match_coverage,
-                fuzzy_threshold=self.config.market_fuzzy_threshold,
-                semantic_threshold=self._semantic_threshold(),
-                allow_lots=allow_lots,
-            )
-            if item.item_id not in blocked
-            and (
-                wants_damaged
-                or condition_bucket(
-                    getattr(item, "condition", ""), getattr(item, "condition_id", "")
-                ) != "parts"
-            )
-        ]
+        matched = []
+        text_ok = filter_comparable(
+            row["query"], items, semantic_threshold=self._semantic_threshold(), **rules
+        )
+        for item in text_ok:
+            if item.item_id in blocked:
+                reason = "blocked: flagged not-the-item"
+            elif not wants_damaged and condition_bucket(
+                getattr(item, "condition", ""), getattr(item, "condition_id", "")
+            ) == "parts":
+                reason = "condition: for parts or not working"
+            else:
+                matched.append(item)
+                continue
+            if rejected is not None:
+                rejected[item.item_id] = reason
+        if rejected is not None:
+            passed = {id(item) for item in text_ok}
+            for item in items:
+                if id(item) not in passed:
+                    rejected[item.item_id] = match_verdict(
+                        row["query"], item.title, **rules
+                    ).reason
         if allow_lots or row["category_id"]:
             return matched
-        return self._category_consensus(matched)
+        kept = self._category_consensus(matched)
+        if rejected is not None and len(kept) != len(matched):
+            keeping = {id(item) for item in kept}
+            for item in matched:
+                if id(item) not in keeping:
+                    rejected[item.item_id] = (
+                        f"category: filed under “{getattr(item, 'category_name', '')}”, "
+                        "not the market's main category"
+                    )
+        return kept
 
     def _category_consensus(self, items: list) -> list:
         """Drop listings outside the dominant category when one clearly dominates.
@@ -736,9 +773,10 @@ class EbaySpyService:
             if not getattr(item, "category_id", "") or item.category_id == cat_id
         ]
 
-    async def _sample_market(self, row) -> _Snapshot:
+    async def _sample_market(self, row, *, explain: bool = False) -> _Snapshot:
         """Search, narrow to comparable listings, and split them into per-variant
-        clusters. Pricing happens in :meth:`_quote_market`."""
+        clusters. Pricing happens in :meth:`_quote_market`. With ``explain`` the
+        snapshot also records why each rejected listing was rejected."""
         query = row["query"]
         category_ids = row["category_id"] or None
         include_auctions = self._watch_auctions_enabled(row)
@@ -753,9 +791,14 @@ class EbaySpyService:
             category_ids=category_ids,
             include_auctions=include_auctions,
         )
-        # A full page means the sample is a window onto a larger market, so a
-        # listing dropping out of it is not evidence that the listing ended.
-        truncated = len(items) >= min(max(limit, 1), 200)
+        # When eBay reports more matches than it returned (or, failing that, a
+        # full page came back), the sample is a window onto a larger market, so
+        # a listing dropping out of it is not evidence that the listing ended.
+        total = getattr(items, "total", None)
+        truncated = (
+            total > len(items) if total is not None
+            else len(items) >= min(max(limit, 1), 200)
+        )
         if self.config.market_deal_scan:
             # Optional supplementary cheapest-first pass to catch deep-page deals.
             extra = await self.ebay.search_market(
@@ -770,7 +813,8 @@ class EbaySpyService:
             )
             seen = {item.item_id for item in items}
             items.extend(item for item in extra if item.item_id not in seen)
-        comparable = self._comparable(row, items)
+        rejected: dict[str, str] | None = {} if explain else None
+        comparable = self._comparable(row, items, rejected=rejected)
         # Enrich with eBay's structured catalog data (aspects, ePID…) so variant
         # clustering uses authoritative values instead of guessing from titles.
         # The client caches per listing, so each one costs a call once, not once
@@ -804,6 +848,7 @@ class EbaySpyService:
             dimensions=dimensions,
             clusters=cluster_by_variant(fixed, dimensions),
             truncated=truncated,
+            rejected=rejected or {},
         )
 
     def _cleared_observations(self, row, dimensions: list[str]) -> dict[str, list[pricing.Obs]]:
@@ -924,9 +969,9 @@ class EbaySpyService:
         that vanished — the raw material for demand and for cleared-price evidence.
 
         When the sample is the whole market, an absence beyond the grace period
-        is an ending. When it is only a window (a full page), absence proves
-        nothing, so a bounded number are confirmed with getItem each check and
-        the rest wait their turn.
+        counts as an ending for the demand read. When it is only a window,
+        absence proves nothing. Either way a bounded number are confirmed with
+        getItem each check, and only confirmed endings inform the price.
         """
         watch_id = row["id"]
         self.store.record_market_sightings(
@@ -948,8 +993,11 @@ class EbaySpyService:
         seen = {item.item_id for item in snap.fixed}
         grace = self.config.market_demand_grace_seconds
         if not snap.truncated:
+            # Good enough for the demand read; NOT for pricing (below).
             self.store.mark_disappeared_listings(watch_id, seen, grace)
-            return
+        # A listing also vanishes when a filter changes (a new category, a price
+        # cap) or the matcher is retuned. Only a getItem that says "ended" turns
+        # an absence into price evidence; one that says "still live" clears it.
         for item_id in self.store.disappeared_candidates(
             watch_id, seen, grace, self.config.market_verify_ended_limit
         ):
@@ -1054,10 +1102,12 @@ class EbaySpyService:
             )
 
     def _demand_summary(self, watch_id: int) -> tuple[str, str]:
+        row = self.store.get_market_watch(watch_id)
+        cadence = self._market_interval_for(row) if row is not None else 0
         stats = self.store.market_demand_stats(
             watch_id,
             self.config.market_demand_window_days,
-            self.config.market_demand_grace_seconds,
+            max(self.config.market_demand_grace_seconds, cadence),
         )
         return demand_metrics.summarize(
             stats,
@@ -1092,7 +1142,7 @@ class EbaySpyService:
         for auction in snap.auctions:
             label = variant_key(auction, snap.dimensions)
             fair = snap.quotes.get(label) if label is not None else None
-            if fair is None or label in muted:
+            if fair is None or self._is_muted(label, muted):
                 continue
             secs = self._seconds_until(auction.end_date)
             if secs is not None and secs <= 0:
@@ -1147,10 +1197,13 @@ class EbaySpyService:
                 continue
             label = variant_key(lot, snap.dimensions)
             fair = snap.quotes.get(label) if label is not None else None
-            if fair is None or label in muted:
+            if fair is None or self._is_muted(label, muted):
                 continue
             lot_value = fair.price * quantity
-            if not (lot_value * ratio <= lot.total_price <= lot_value * (1 - discount / 100)):
+            ceiling = deal_threshold(
+                lot_value, discount, fair.predictive_sd, self.config.market_confidence_z
+            )
+            if not (lot_value * ratio <= lot.total_price <= ceiling):
                 continue
             if self.store.deal_already_alerted(watch_id, lot.item_id, "lot"):
                 continue
@@ -1158,6 +1211,16 @@ class EbaySpyService:
                 _Deal(lot, lot_value, label or None, "lot", lot_quantity=quantity, quote=fair)
             )
         return out
+
+    @staticmethod
+    def _is_muted(label: str, muted: set[str]) -> bool:
+        """Whether a variant is muted. A mute names the attributes the user
+        muted ("128gb"); it keeps applying when the market later splits on a
+        further dimension and the label grows ("128gb · used")."""
+        if label in muted:
+            return True
+        parts = set(label.split(" · ")) if label else set()
+        return any(mute and set(mute.split(" · ")) <= parts for mute in muted)
 
     @staticmethod
     def _deal_score(deal: _Deal) -> float:
@@ -1174,7 +1237,7 @@ class EbaySpyService:
         z = self.config.market_confidence_z
         found: list[_Deal] = []
         for label, fair in snap.quotes.items():
-            if label in muted:
+            if self._is_muted(label, muted):
                 continue
             group = snap.clusters.get(label, [])
             for item in find_deals(
@@ -1197,7 +1260,6 @@ class EbaySpyService:
                         _Deal(item, fair.price, label or None, "offer",
                               offer_estimate=estimate, quote=fair)
                     )
-        self._auction_turbo.pop(watch_id, None)
         found.extend(self._auction_candidates(row, snap, discount, muted))
         found.extend(self._lot_candidates(row, snap, discount, muted))
         best: dict[str, _Deal] = {}
@@ -1207,9 +1269,7 @@ class EbaySpyService:
                 best[deal.item.item_id] = deal
         return sorted(best.values(), key=self._deal_score, reverse=True)
 
-    async def _check_market_watch(self, row, chats: list[str]) -> int:
-        watch_id = row["id"]
-        query = row["query"]
+    def _watch_discount(self, row) -> float:
         discount = (
             row["discount_percent"]
             if row["discount_percent"] is not None
@@ -1218,7 +1278,14 @@ class EbaySpyService:
         if self.config.market_feedback_enabled:
             # 👍/👎 feedback nudges the required discount; flows through every deal
             # type since this single value drives fixed, auction and lot deals.
-            discount = max(1, min(95, discount + self.store.get_discount_nudge(watch_id)))
+            discount = max(1, min(95, discount + self.store.get_discount_nudge(row["id"])))
+        return discount
+
+    async def _check_market_watch(self, row, chats: list[str]) -> int:
+        # Turbo polling is re-armed by each check that still sees an auction
+        # near its end. Cleared up front so a check that errors, or can no
+        # longer price the market, cannot leave the watch polling every 45s.
+        self._auction_turbo.pop(row["id"], None)
         try:
             snap = await self._sample_market(row)
             await self._quote_market(row, snap)
@@ -1226,12 +1293,20 @@ class EbaySpyService:
             # endings it captures are what eventually make a thin market priceable.
             await self._record_lifecycle(row, snap)
         except Exception as exc:
-            log.exception("Failed pricing market watch %s (%s)", watch_id, query)
+            log.exception("Failed pricing market watch %s (%s)", row["id"], row["query"])
             await self._finish_market_check(
                 row, chats, deal_count=0, error=str(exc) or exc.__class__.__name__
             )
             return 0
+        return await self._alert_deals(row, chats, snap)
 
+    async def _alert_deals(self, row, chats: list[str], snap: _Snapshot) -> int:
+        """Screen, rank and send the deals in a priced snapshot. Returns how many
+        were sent. (Also the entry point a dry run drives, with a recording
+        Telegram, so what it reports is exactly what would have been alerted.)"""
+        watch_id = row["id"]
+        query = row["query"]
+        discount = self._watch_discount(row)
         quotes = snap.quotes
         if not quotes:
             await self._finish_market_check(row, chats, deal_count=0, empty=True)
@@ -2025,11 +2100,7 @@ class EbaySpyService:
             log.warning("Could not quote market watch %s", row["id"], exc_info=True)
             return f"Couldn't price it just now ({str(exc) or exc.__class__.__name__})."
         currency = MARKETPLACE_CURRENCY.get(self._home_marketplace(), "USD")
-        discount = (
-            row["discount_percent"]
-            if row["discount_percent"] is not None
-            else self.config.market_discount_percent
-        )
+        discount = self._watch_discount(row)
 
         def money(value: float) -> str:
             return format_money(value, currency)
@@ -2130,6 +2201,10 @@ class EbaySpyService:
                 f"the market. Pin the exact stock image with /refimage {watch_id} <url>."
             )
         value = parts[1]
+        if value.lower() in {"clear", "auto", "off", "none"} or value.lower().startswith(
+            ("http://", "https://")
+        ):
+            self.store.clear_suppressed_deals(watch_id)
         if value.lower() in {"clear", "auto", "off", "none"}:
             self.store.set_market_reference_image(watch_id, None)
             return f"Cleared the reference image for “{query}” — back to auto."
