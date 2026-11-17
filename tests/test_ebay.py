@@ -252,3 +252,147 @@ def test_hydration_failure_keeps_search_listing() -> None:
         assert asyncio.run(client.seller_listings("seller_one")) == [found]
     finally:
         asyncio.run(client.close())
+
+
+# --- hydration cache and transport resilience ---------------------------------
+
+import httpx  # noqa: E402
+
+from ebayspy.ebay import EbayRateLimited  # noqa: E402
+from ebayspy.models import MarketItem  # noqa: E402
+
+
+def _market(item_id: str) -> MarketItem:
+    return MarketItem(
+        item_id=item_id, title="Thing", url=f"https://example.test/itm/{item_id}",
+        seller="s", currency="USD", item_price=10, total_price=10,
+    )
+
+
+def test_market_hydration_is_cached_and_rolls_through_the_sample() -> None:
+    client = _client()
+    calls: list[str] = []
+
+    async def fake_detail(item_id: str) -> dict:
+        calls.append(item_id)
+        return {"epid": "E1", "localizedAspects": [{"name": "Storage Capacity", "value": "256 GB"}]}
+
+    client._get_item_by_legacy_id = fake_detail
+    items = [_market(str(i)) for i in range(5)]
+    try:
+        first = asyncio.run(client.hydrate_market_items(items, limit=2))
+        assert calls == ["0", "1"]  # only the per-check budget
+        assert [bool(i.aspects) for i in first] == [True, True, False, False, False]
+        # Next check: the first two are free, so the budget moves on to new ones.
+        second = asyncio.run(client.hydrate_market_items(items, limit=2))
+        assert calls == ["0", "1", "2", "3"]
+        assert [bool(i.aspects) for i in second] == [True, True, True, True, False]
+        asyncio.run(client.hydrate_market_items(items, limit=2))
+        asyncio.run(client.hydrate_market_items(items, limit=2))
+        assert calls == ["0", "1", "2", "3", "4"]  # fully covered: no further calls
+        assert second[0].aspects == {"Storage Capacity": "256 GB"} and second[0].epid == "E1"
+    finally:
+        asyncio.run(client.close())
+
+
+def test_failed_hydration_is_not_retried_every_check() -> None:
+    client = _client()
+    calls: list[str] = []
+
+    async def broken_detail(item_id: str) -> dict:
+        calls.append(item_id)
+        raise RuntimeError("eBay Browse API item lookup failed (400)")
+
+    client._get_item_by_legacy_id = broken_detail
+    try:
+        for _ in range(3):
+            out = asyncio.run(client.hydrate_market_items([_market("1")], limit=5))
+        assert calls == ["1"] and out[0].aspects == {}
+    finally:
+        asyncio.run(client.close())
+
+
+def _transport_client(handler) -> EbayClient:
+    client = _client()
+    client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client
+
+
+def test_revoked_token_is_refreshed_once_on_401() -> None:
+    tokens = iter(["stale", "fresh"])
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": next(tokens), "expires_in": 7200})
+        seen.append(request.headers["Authorization"])
+        if request.headers["Authorization"] == "Bearer stale":
+            return httpx.Response(401, json={"errors": [{"message": "Invalid access token"}]})
+        return httpx.Response(200, json={"itemSummaries": []})
+
+    client = _transport_client(handler)
+    try:
+        assert asyncio.run(client.search_market("thing")) == []
+        assert seen == ["Bearer stale", "Bearer fresh"]
+    finally:
+        asyncio.run(client.close())
+
+
+def test_rate_limit_trips_a_breaker_instead_of_spending_more_calls() -> None:
+    hits = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal hits
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 7200})
+        hits += 1
+        return httpx.Response(429, headers={"Retry-After": "120"}, json={})
+
+    client = _transport_client(handler)
+    try:
+        for _ in range(3):
+            try:
+                asyncio.run(client.search_market("thing"))
+            except EbayRateLimited:
+                pass
+            else:
+                raise AssertionError("expected EbayRateLimited")
+        assert hits == 1  # the second and third calls never left the process
+        # A rate-limited hydration is not remembered as the listing's failure.
+        asyncio.run(client.hydrate_market_items([_market("1")], limit=5))
+        assert client._detail_cache == {}
+        # ...and "unknown", not "ended", is the verdict on an item we could not ask about.
+        assert asyncio.run(client.item_ended_state("1")) == (None, None)
+    finally:
+        asyncio.run(client.close())
+
+
+def test_transient_5xx_is_retried_once() -> None:
+    statuses = iter([502, 200])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 7200})
+        status = next(statuses)
+        return httpx.Response(status, json={"itemSummaries": []} if status == 200 else {})
+
+    client = _transport_client(handler)
+    try:
+        assert asyncio.run(client.search_market("thing")) == []
+    finally:
+        asyncio.run(client.close())
+
+
+def test_market_item_carries_condition_id() -> None:
+    client = _client()
+    summary = {
+        "legacyItemId": "123456789012",
+        "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+        "price": {"value": "10.00", "currency": "USD"},
+        "condition": "For parts or not working",
+        "conditionId": "7000",
+    }
+    try:
+        assert client._market_item_from_summary(summary, "USD").condition_id == "7000"
+    finally:
+        asyncio.run(client.close())

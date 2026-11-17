@@ -150,6 +150,12 @@ class Config:
     market_health_threshold: int
     market_risk_warn: int
     market_risk_max: int
+    # Fair-value engine.
+    market_confidence_z: float
+    market_cleared_window_days: int
+    market_verify_ended_limit: int
+    market_category_consensus: float
+    market_resale_shipping: float
     # Price-drop alerts on watched sellers' still-active listings.
     seller_price_drop_percent: int
     # Best-offer-aware deal detection.
@@ -249,6 +255,11 @@ class Config:
             market_health_threshold=_int_env("MARKET_HEALTH_THRESHOLD", 5),
             market_risk_warn=_int_env("MARKET_RISK_WARN", 40),
             market_risk_max=_int_env("MARKET_RISK_MAX", 100),
+            market_confidence_z=_float_env("MARKET_CONFIDENCE_Z", 1.0),
+            market_cleared_window_days=_int_env("MARKET_CLEARED_WINDOW_DAYS", 30),
+            market_verify_ended_limit=_int_env("MARKET_VERIFY_ENDED_LIMIT", 3),
+            market_category_consensus=_float_env("MARKET_CATEGORY_CONSENSUS", 0.7),
+            market_resale_shipping=_float_env("MARKET_RESALE_SHIPPING", 0.0),
             seller_price_drop_percent=_int_env("SELLER_PRICE_DROP_PERCENT", 5),
             market_offer_aware=_bool_env("MARKET_OFFER_AWARE", False),
             market_expected_offer_discount=_float_env("MARKET_EXPECTED_OFFER_DISCOUNT", 10.0),

@@ -16,8 +16,9 @@ Track specific eBay sellers and items and receive Telegram notifications when th
 - Deduplicates items in SQLite so restarts do not resend old listings.
 - Keeps a separate **market watch** lane that snipes below-market deals:
   - You name an item (search terms, optionally a condition and a price cap); ebayspy
-    samples the live Buy It Now listings and derives a **market price** from the trimmed
-    median total cost (item + shipping).
+    samples the live Buy It Now listings and quotes a **fair value** for it — an estimate
+    of what it actually trades at, with a confidence interval — rather than a plain median
+    of what sellers are asking (see [How the price is worked out](#how-the-price-is-worked-out)).
   - When a listing appears at or below your discount threshold (default 15% under market),
     it sends a deal alert showing the price, the market estimate, and your saving.
   - **Smart comparable matching** is the key to a correct market price. A keyword search
@@ -62,21 +63,25 @@ Track specific eBay sellers and items and receive Telegram notifications when th
     Deal alerts state the variant the comparison used (`Market ≈ £722 for pro max · 256gb`),
     and `/watches` tags the headline price with the dominant variant.
   - A floor (default 40% of market) suppresses "too good to be true" listings that are
-    almost always the wrong item or a scam; a minimum comparable-sample gate refuses to
-    price (or alert) until enough comparables back the median; and alerts are capped per
-    cycle so a backlog never floods the chat.
+    almost always the wrong item or a scam; a minimum-evidence gate refuses to price (or
+    alert) until enough *independent* comparables back the figure (one seller's duplicate
+    listings count for little); and alerts are capped per cycle so a backlog never floods
+    the chat. Listings eBay marks **for parts / not working** are never comparables (unless
+    the watch itself asks for faulty units), and when one eBay category clearly dominates
+    the matches, look-alikes filed elsewhere are dropped (`MARKET_CATEGORY_CONSENSUS`).
   - You can refine matching per watch: add `exclude:tap` (or `-tap`) to drop unwanted
     variants, `condition:new|used`, and `under:PRICE` to bound the sample.
   - **Real sold prices (optional).** By default the market figure is a live-asking estimate
     (the Browse API doesn't expose sold prices). If you have approved access to eBay's
     **Marketplace Insights API** (a Limited Release), set `MARKET_PRICE_SOURCE=insights` and
-    each variant is priced against its *actual sold median*, and demand becomes a measured
-    sales-velocity instead of the disappearance proxy. It falls back to the live estimate
-    automatically if the call isn't entitled.
+    real sold prices become the dominant evidence in each variant's fair value, and demand
+    becomes a measured sales-velocity instead of the disappearance proxy. It falls back to
+    the listing-based estimate automatically if the call isn't entitled.
   - **Rich, actionable deal alerts.** Each deal shows the item photo, an estimated **flip
     profit & ROI** (market minus buy price minus configurable eBay fees), a **price trend**
-    (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, the **price spread** (P10–P90)
-    and **recent sold comps** (with Insights), a best-offer flag, the seller rating/link, and
+    (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, the fair value's **likely range
+    and confidence** with the evidence behind it, **recent sold comps** (with Insights), a
+    best-offer flag, the seller rating/link, and
     inline buttons to open the listing, **mute that variant**, flag a **wrong match**
     (which teaches the watch a new exclude term), or rate the deal **👍/👎** (which tunes the
     watch's required discount over time).
@@ -147,6 +152,7 @@ Track specific eBay sellers and items and receive Telegram notifications when th
     snipe below-market deals (e.g. `/watch dyson airblade hu02 condition:new under:400 discount:20`)
   - `/unwatch <id>` — stop a market watch (ids shown by `/watches`)
   - `/watches` — list market watches with market estimate, variant, price trend, and last check
+  - `/quote <id>` — the pricing breakdown for a watch: fair value, confidence, evidence, alert price
   - `/demand <id>` — the demand/liquidity read for a watch
   - `/refimage <id> <image-url>` — pin the reference "stock" photo a watch matches listings
     against (`/refimage <id>` shows it, `/refimage <id> clear` reverts to auto)
@@ -157,6 +163,53 @@ Track specific eBay sellers and items and receive Telegram notifications when th
   - `/invite @username`
   - `/uninvite @username`
   - `/invites`
+
+## How the price is worked out
+
+The Browse API only shows live asking prices, and a median of asking prices overstates what
+things sell for: well-priced listings sell and vanish, overpriced ones sit there. So each
+variant is quoted the way a trading desk marks a book — several imperfect sources of
+evidence, each with an honest error bar, fused into one **fair value**:
+
+| Evidence | What it is | Trust |
+| --- | --- | --- |
+| **asks** | live asking prices in the sample | plentiful but biased high |
+| **ended** | last price of listings confirmed to have ended in the past `MARKET_CLEARED_WINDOW_DAYS`, newest weighted most | a proxy for a sale |
+| **sold** | real completed sales (Marketplace Insights, if entitled) | best |
+
+For each source: one seller's duplicate listings are down-weighted (k copies count as √k),
+the centre is a weighted median, the spread a robust (MAD) estimate in log-price space, and
+anything more than ~3 robust sigmas out — or outside a hard 0.4×–2.5× band — is clipped.
+Sources are combined by inverse variance, and when they disagree by more than their error
+bars allow, the interval is widened rather than papered over.
+
+What that buys you:
+
+- **A confidence figure.** Every quote carries a likely range and a 0–100% confidence.
+  Asking prices alone never score above 50% however many there are; confidence builds as the
+  watch observes listings ending (or has sold data).
+- **A deal bar that adapts.** Your `discount:` always applies. On top, the gap must exceed
+  `MARKET_CONFIDENCE_Z` (default 1) standard deviations of ordinary scatter, so a thin or
+  noisy market needs a bigger gap before it is called a deal, while a tight one is
+  unaffected. Set `MARKET_CONFIDENCE_Z=0` for the plain percentage rule.
+- **Like-for-like variants.** The market is split by model line, capacity, **condition**
+  (new / open box / refurbished / used) and colour — but only on a dimension that moves the
+  price *within* the groups already chosen, by more than noise. A listing that doesn't state
+  a chosen attribute is left unpriced rather than guessed, and the chosen split is sticky so
+  labels don't flip between checks.
+- **Realistic flip numbers.** Profit is net of the marketplace fee *and* the postage you pay
+  (`MARKET_RESALE_SHIPPING`), shown both at fair value and at a quick-sale price.
+- **`/quote <id>`** prints the working for a watch: fair value, range, confidence, the
+  evidence behind it, the price alerts fire at, the quick-sale price and your break-even.
+
+Deals are ranked by how many standard deviations below fair value they sit, so a modest gap
+in a tight market can outrank a wide one in a noisy one.
+
+**Limits worth knowing.** "Ended" is not "sold" — a listing can be withdrawn — so ended
+prices are treated as a proxy with their own error bar, not as sales. The error bars for
+each source are priors, not measurements from your market. And none of this has access to
+what the matcher gets wrong: a watch that matches the wrong items prices the wrong market,
+which is why `/quote` shows the comparable counts.
 
 ## Setup
 
@@ -255,6 +308,7 @@ sudo scripts/enable-wake-sudo.sh  # one-off: lets the agent arm wakes (pmset) wi
 > Scheduled wake-from-sleep is most reliable with the Mac **on power**; on battery with the
 > lid closed, macOS may not honour every wake. For 24/7 reliability, run on a VPS instead.
 
+
 ## VPS notes
 
 Use `systemd/ebayspy.service` as a template. Update `WorkingDirectory`, `EnvironmentFile`,
@@ -275,10 +329,19 @@ the higher limit.
   events.
 - An **observe** poll costs about **1 call per seller** in steady state: just the search.
   Detail lookups happen only for items that are actually new.
-- A **market watch** costs about **1 call per watch per cycle**: a single search that both
-  prices the market and surfaces deals (no per-item detail lookups). At the 10-minute
-  default that is ~144 calls/day per watch; tune with `MARKET_INTERVAL_SECONDS` or per
-  watch via `/watch ... every:TIME`.
+- A **market watch** costs about **1 call per watch per cycle** in steady state: a single
+  search that both prices the market and surfaces deals. At the 10-minute default that is
+  ~144 calls/day per watch; tune with `MARKET_INTERVAL_SECONDS` or per watch via
+  `/watch ... every:TIME`. On top of that:
+  - each *new* comparable listing is enriched once with `getItem` (up to
+    `MARKET_HYDRATE_LIMIT` per check) and then cached for a week, so the cost is per
+    listing, not per check;
+  - when a search returns a full page (the market is bigger than the sample), up to
+    `MARKET_VERIFY_ENDED_LIMIT` vanished listings per check are confirmed with `getItem`
+    before they count as ended;
+  - `MARKET_DEAL_SCAN`, `MARKET_PRICE_SOURCE=insights` and `markets:` each add a search.
+- On an HTTP 429 the client stops calling eBay until the `Retry-After` it was given, rather
+  than spending more of the quota to be told no; a revoked token is refreshed on 401.
 
 So an observe-list seller uses roughly `86400 / interval` calls/day. At the 3-minute
 default that is ~480 calls/day per seller; at 5 minutes, ~288. Budget your sellers and

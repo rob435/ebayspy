@@ -1,17 +1,17 @@
 """Pure helpers for pricing a market watch and spotting below-market deals.
 
-The Browse API only exposes *active asking prices*, not completed-sale prices,
-so "market price" here is the median total cost (item + shipping) of the live
-listings that match a watch. The median is computed twice: once over the raw
-sample, then again after trimming items that sit far from that first median, so
-stray parts/accessories/bundles do not drag the figure around.
+The statistics live in :mod:`ebayspy.pricing` (robust location, evidence
+fusion, confidence). This module is the layer above it: which listings belong
+to the same variant, which of them are deals against a fair value, and what a
+flip would realistically net.
 """
 
 from __future__ import annotations
 
-import statistics
-from collections.abc import Callable, Iterable
+import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
+from . import pricing
 from .matching import attributes, canonical_colours, normalize_capacity
 from .models import MarketItem
 
@@ -19,37 +19,71 @@ from .models import MarketItem
 # only when it independently splits the market (see choose_cluster_dimensions),
 # so a watch is priced per model-line *and* capacity when both matter, but not
 # fragmented on an attribute (e.g. colour) that does not move the price.
-CLUSTER_DIMENSIONS = ("qualifier", "capacity", "colour")
+CLUSTER_DIMENSIONS = ("qualifier", "capacity", "condition", "colour")
 
 # eBay aspect names (lowercased) that authoritatively carry each variant value.
+# "Memory" is deliberately absent: on phones and laptops it is RAM, not storage.
 _CAPACITY_ASPECTS = (
     "storage capacity", "capacity", "hard drive capacity", "ssd capacity",
-    "internal storage", "memory",
+    "internal storage",
 )
 _COLOUR_ASPECTS = ("colour", "color")
 
+# eBay conditionId → price-relevant bucket. New, open-box, refurbished and used
+# units of one product trade at different levels; "parts" is never a comparable.
+_CONDITION_BY_ID = {
+    "1000": "new",
+    "1500": "open box", "1750": "open box",
+    "2000": "refurb", "2010": "refurb", "2020": "refurb", "2030": "refurb", "2500": "refurb",
+    "2750": "used", "3000": "used", "4000": "used", "5000": "used", "6000": "used",
+    "7000": "parts",
+}
+
 # Items priced far from the rough median are usually a different product
 # (a spare part, an accessory, or a multi-item bundle) rather than a comparable.
-TRIM_LOW_RATIO = 0.4
-TRIM_HIGH_RATIO = 2.5
+TRIM_LOW_RATIO = pricing.BAND_LOW
+TRIM_HIGH_RATIO = pricing.BAND_HIGH
 
-# A Best Offer is rarely accepted much below ~70% of the asking price, so an offer
-# estimate is only credible when the list price is close enough to it.
-_MIN_OFFER_ACCEPT_RATIO = 0.70
+# A new dimension must separate its groups by at least this many standard errors
+# (as well as by ``min_dispersion``) before the market is split on it.
+_SPLIT_SIGNIFICANCE_Z = 2.0
+
+
+def condition_bucket(condition: str = "", condition_id: str = "") -> str:
+    """Price-relevant condition bucket: new / open box / refurb / used / parts.
+
+    Trading cards reuse the generic ids for "Graded"/"Ungraded", so those two
+    words win over the id. Unknown wording returns "" (unresolved).
+    """
+    text = (condition or "").strip().lower()
+    if text in {"graded", "ungraded"}:
+        return text
+    bucket = _CONDITION_BY_ID.get(str(condition_id or "").strip())
+    if bucket:
+        return bucket
+    if not text:
+        return ""
+    if "parts" in text or "not working" in text:
+        return "parts"
+    if "refurb" in text:
+        return "refurb"
+    if "open box" in text or (
+        text.startswith("new") and any(word in text for word in ("other", "defect", "without"))
+    ):
+        return "open box"
+    if text.startswith(("new", "brand new")):
+        return "new"
+    if any(word in text for word in ("used", "pre-owned", "preowned", "good", "acceptable",
+                                     "excellent", "like new")):
+        return "used"
+    return ""
 
 
 def market_price(totals: Iterable[float]) -> float | None:
-    """Return a trimmed median of total prices, or None when there is no data."""
-    values = sorted(value for value in totals if value and value > 0)
-    if not values:
-        return None
-    rough = statistics.median(values)
-    trimmed = [
-        value
-        for value in values
-        if rough * TRIM_LOW_RATIO <= value <= rough * TRIM_HIGH_RATIO
-    ]
-    return statistics.median(trimmed) if trimmed else rough
+    """Robust centre of total prices (clipped weighted median), or None when
+    there is no data. See :func:`ebayspy.pricing.robust_estimate`."""
+    estimate = pricing.robust_estimate(pricing.Obs(value) for value in totals if value)
+    return estimate.price if estimate else None
 
 
 def price_distribution(values: Iterable[float]) -> tuple[float, float, float] | None:
@@ -70,11 +104,27 @@ def price_distribution(values: Iterable[float]) -> tuple[float, float, float] | 
     return percentile(0.10), percentile(0.50), percentile(0.90)
 
 
+def deal_threshold(
+    price: float, discount_percent: float, predictive_sd: float = 0.0, confidence_z: float = 0.0
+) -> float:
+    """Highest total price that counts as a deal against ``price``.
+
+    The configured discount always applies; with ``confidence_z`` the edge must
+    also clear that many predictive standard deviations, so thin or noisy
+    markets demand a bigger gap. See :func:`ebayspy.pricing.deal_ceiling`.
+    """
+    plain = price * (1 - min(max(discount_percent, 0.0), 99.0) / 100)
+    return min(plain, pricing.deal_ceiling(price, 0.0, predictive_sd, confidence_z))
+
+
 def find_deals(
     items: list[MarketItem],
     price: float | None,
     discount_percent: float,
     min_ratio: float = TRIM_LOW_RATIO,
+    *,
+    predictive_sd: float = 0.0,
+    confidence_z: float = 0.0,
 ) -> list[MarketItem]:
     """Items priced at least ``discount_percent`` below ``price``.
 
@@ -84,7 +134,7 @@ def find_deals(
     """
     if not price or price <= 0:
         return []
-    threshold = price * (1 - discount_percent / 100)
+    threshold = deal_threshold(price, discount_percent, predictive_sd, confidence_z)
     floor = price * min_ratio
     deals = [item for item in items if floor <= item.total_price <= threshold]
     deals.sort(key=lambda item: item.total_price)
@@ -97,36 +147,33 @@ def offer_candidates(
     list_discount_percent: float,
     offer_discount_percent: float,
     min_ratio: float = TRIM_LOW_RATIO,
-    sold_comps: list[float] | None = None,
+    *,
+    threshold: float | None = None,
 ) -> list[tuple[MarketItem, float]]:
     """Best-Offer listings whose LIST price isn't a deal but a plausible accepted
-    offer would be. Returns (item, estimated_offer_price), cheapest list first.
+    offer would be. Returns (item, estimated_offer_total), cheapest list first.
 
-    An item qualifies when it accepts offers, its list total sits ABOVE the deal
-    threshold (so it isn't already a ``find_deals`` deal) but within a sane band,
-    and the estimated accepted-offer price clears that threshold while staying above
-    the floor. The estimate is ``price*(1 - offer_discount_percent/100)``, lowered
-    (never raised) toward real sold comps when supplied, so insights only sharpens
-    it and the heuristic is the always-available fallback.
+    The estimate is taken off the listing's *own* asking price — sellers accept
+    a discount on what they asked, not a number derived from the market — so it
+    is ``item price × (1 - offer_discount_percent/100)`` plus its shipping. An
+    item qualifies when its list total sits above the deal threshold (so it is
+    not already a ``find_deals`` deal) and that estimate lands at or below it
+    while staying above the too-good-to-be-true floor.
     """
     if not price or price <= 0:
         return []
-    threshold = price * (1 - list_discount_percent / 100)
+    if threshold is None:
+        threshold = deal_threshold(price, list_discount_percent)
     floor = price * min_ratio
-    estimate = price * (1 - offer_discount_percent / 100)
-    if sold_comps and (sold := market_price(sold_comps)):
-        estimate = min(estimate, sold)
-    estimate = max(estimate, floor)
-    if estimate > threshold:  # even a good offer wouldn't make it a deal
-        return []
-    # Cap the band so the estimate stays a credible offer off the item's OWN list
-    # price — don't tell the user a seller asking 240 will take 80.
-    ceiling = min(price * TRIM_HIGH_RATIO, estimate / _MIN_OFFER_ACCEPT_RATIO)
-    deals = [
-        (item, estimate)
-        for item in items
-        if item.accepts_offers and threshold < item.total_price <= ceiling
-    ]
+    keep = 1 - min(max(offer_discount_percent, 0.0), 99.0) / 100
+    deals = []
+    for item in items:
+        if not item.accepts_offers or item.total_price <= threshold:
+            continue
+        shipping = max(0.0, item.total_price - item.item_price)
+        estimate = (item.total_price - shipping) * keep + shipping
+        if floor <= estimate <= threshold:
+            deals.append((item, estimate))
     deals.sort(key=lambda pair: pair[0].total_price)
     return deals
 
@@ -179,24 +226,28 @@ def find_arbitrage(
 
 
 def estimate_resale_profit(
-    market_price: float, buy_total: float, fee_percent: float, fee_fixed: float
+    market_price: float,
+    buy_total: float,
+    fee_percent: float,
+    fee_fixed: float,
+    shipping: float = 0.0,
 ) -> tuple[float, float]:
-    """Estimate flip profit and ROI if bought at ``buy_total`` and resold at market.
+    """Estimate flip profit and ROI if bought at ``buy_total`` and resold at
+    ``market_price`` (the buyer's total).
 
-    Resale proceeds are the market price net of the seller fee (a percentage plus
-    a fixed per-order charge). Returns (profit, roi_percent); ROI is profit over
-    the buy cost. Both can be negative.
+    Proceeds are net of the seller fee (a percentage of the total plus a fixed
+    per-order charge) and of the postage you pay to send it. Returns
+    (profit, roi_percent); ROI is profit over the buy cost. Both can be negative.
     """
-    net_resale = market_price * (1 - fee_percent / 100) - fee_fixed
-    profit = net_resale - buy_total
+    profit = pricing.net_proceeds(market_price, fee_percent, fee_fixed, shipping) - buy_total
     roi = (profit / buy_total * 100) if buy_total > 0 else 0.0
     return profit, roi
 
 
-def _item_variant(item: MarketItem, dimension: str) -> str | None:
+def _item_variant(item, dimension: str) -> str | None:
     """The variant value for a dimension, preferring eBay's structured aspects
     (authoritative, multi-category) over parsing the title."""
-    aspects = {k.lower(): v for k, v in (item.aspects or {}).items()}
+    aspects = {k.lower(): v for k, v in (getattr(item, "aspects", None) or {}).items()}
     if dimension == "capacity":
         for name in _CAPACITY_ASPECTS:
             if name in aspects and (cap := normalize_capacity(aspects[name])):
@@ -207,45 +258,45 @@ def _item_variant(item: MarketItem, dimension: str) -> str | None:
                 colours = canonical_colours(set(aspects[name].lower().split()))
                 if colours:
                     return ",".join(sorted(colours))
+    elif dimension == "condition":
+        return condition_bucket(
+            getattr(item, "condition", ""), getattr(item, "condition_id", "")
+        ) or None
     return attributes(item.title).get(dimension)  # type: ignore[return-value]
 
 
-def choose_cluster_dimensions(
-    items: list[MarketItem],
-    specified: set[str],
-    *,
-    min_sample: int,
-    min_dispersion: float,
-) -> list[str]:
-    """Variant dimensions worth pricing separately (possibly several, or none).
+def variant_values(
+    item, dimensions: Sequence[str] = CLUSTER_DIMENSIONS
+) -> dict[str, str | None]:
+    """Every dimension's value for an item (None where it cannot be told)."""
+    return {dimension: _item_variant(item, dimension) for dimension in dimensions}
 
-    A dimension qualifies when the query left it open, at least two of its values
-    are each well-populated (``min_sample``), and their medians actually differ
-    (``min_dispersion``) — i.e. the split is both reliable and price-relevant.
-    Items are then clustered by the *combination* of qualifying dimensions, so a
-    phone is priced per model-line and capacity at once, while a price-irrelevant
-    attribute (e.g. colour) or thin data never fragments the sample.
+
+def label_from_values(
+    values: Mapping[str, str | None], dimensions: Sequence[str]
+) -> str | None:
+    """Variant label over ``dimensions``, or None when any of them is unknown.
+
+    An item whose capacity (say) cannot be told is *unresolved*: it could be any
+    variant, so it must never be priced as — or alerted against — one of them.
     """
-    chosen = []
-    for dimension in CLUSTER_DIMENSIONS:
-        if dimension in specified:
+    parts = []
+    for dimension in dimensions:
+        value = values.get(dimension)
+        if not value:
+            return None
+        if dimension == "qualifier" and value == "base":
             continue
-        groups: dict[str, list[MarketItem]] = {}
-        for item in items:
-            value = _item_variant(item, dimension)
-            if value:  # qualifier is always present ("base"); capacity/colour may be None
-                groups.setdefault(value, []).append(item)
-        populated = {v: g for v, g in groups.items() if len(g) >= min_sample}
-        if len(populated) < 2:
-            continue
-        medians = [statistics.median([i.total_price for i in g]) for g in populated.values()]
-        high, low = max(medians), min(medians)
-        if high > 0 and (high - low) / high >= min_dispersion:
-            chosen.append(dimension)
-    return chosen
+        parts.append(value)
+    return " · ".join(parts)
 
 
-def variant_label(item: MarketItem, dimensions: list[str]) -> str:
+def variant_key(item, dimensions: Sequence[str]) -> str | None:
+    """Cluster key for an item, or None when it is unresolved on a dimension."""
+    return label_from_values(variant_values(item, dimensions), dimensions)
+
+
+def variant_label(item, dimensions: Sequence[str]) -> str:
     """Readable variant label for an item over the chosen dimensions.
 
     The plain base model and unknown attributes contribute nothing, so a base
@@ -262,13 +313,98 @@ def variant_label(item: MarketItem, dimensions: list[str]) -> str:
     return " · ".join(parts)
 
 
-def cluster_by_variant(
-    items: list[MarketItem], dimensions: list[str]
-) -> dict[str, list[MarketItem]]:
-    """Group items by their combined variant label (one bucket when no dimensions)."""
+def _dimension_spread(
+    items: Sequence[MarketItem], chosen: Sequence[str], dimension: str, min_sample: int
+) -> tuple[float, bool] | None:
+    """How much ``dimension`` moves the price *within* the cells already chosen.
+
+    Returns (relative spread, significant) weighted over the cells that hold at
+    least two well-populated values, or None when no cell can show it either
+    way. Testing inside cells is what stops a correlated attribute (a colour
+    that only ships on the Pro) from looking price-relevant on its own.
+    """
+    cells: dict[str, dict[str, list[float]]] = {}
+    for item in items:
+        cell = variant_key(item, chosen)
+        value = _item_variant(item, dimension)
+        if cell is None or not value:
+            continue
+        cells.setdefault(cell, {}).setdefault(value, []).append(item.total_price)
+    weighted = 0.0
+    weight = 0
+    significant = True
+    for groups in cells.values():
+        estimates = [
+            estimate
+            for prices in groups.values()
+            if len(prices) >= min_sample
+            and (estimate := pricing.robust_estimate(pricing.Obs(p) for p in prices))
+        ]
+        if len(estimates) < 2:
+            continue
+        high = max(estimates, key=lambda e: e.price)
+        low = min(estimates, key=lambda e: e.price)
+        spread = (high.price - low.price) / high.price
+        gap_se = math.hypot(high.se, low.se)
+        z = (math.log(high.price / low.price) / gap_se) if gap_se > 0 else 0.0
+        size = sum(e.n for e in estimates)
+        weighted += spread * size
+        weight += size
+        significant = significant and z >= _SPLIT_SIGNIFICANCE_Z
+    if not weight:
+        return None
+    return weighted / weight, significant
+
+
+def choose_cluster_dimensions(
+    items: list[MarketItem],
+    specified: set[str],
+    *,
+    min_sample: int,
+    min_dispersion: float,
+    previous: Sequence[str] = (),
+) -> list[str]:
+    """Variant dimensions worth pricing separately (possibly several, or none).
+
+    Dimensions are considered in order and each is tested *conditionally* on the
+    ones already chosen. A new dimension qualifies when the query left it open,
+    at least two of its values are each well-populated (``min_sample``) inside a
+    cell, and their prices differ both materially (``min_dispersion``) and
+    significantly (beyond their standard errors). Items are then clustered by
+    the *combination* of qualifying dimensions.
+
+    ``previous`` makes the choice sticky: a dimension already in use is dropped
+    only on positive evidence that it has stopped mattering (spread under half
+    the threshold), never merely because this sample is too thin to show it.
+    Without that, labels — and with them mutes, history and trends — would flip
+    meaning from one check to the next.
+    """
+    chosen: list[str] = []
+    for dimension in CLUSTER_DIMENSIONS:
+        if dimension in specified:
+            continue
+        evidence = _dimension_spread(items, chosen, dimension, min_sample)
+        if dimension in previous:
+            keep = evidence is None or evidence[0] >= min_dispersion / 2
+        else:
+            keep = evidence is not None and evidence[0] >= min_dispersion and evidence[1]
+        if keep:
+            chosen.append(dimension)
+    return chosen
+
+
+def cluster_by_variant(items: Sequence, dimensions: Sequence[str]) -> dict[str, list]:
+    """Group items by their combined variant label (one bucket when no dimensions).
+
+    Items unresolved on a chosen dimension are left out: they cannot be priced
+    like-for-like, and lumping them into a catch-all bucket would price a mix of
+    variants as if it were one market.
+    """
     if not dimensions:
         return {"": list(items)}
-    clusters: dict[str, list[MarketItem]] = {}
+    clusters: dict[str, list] = {}
     for item in items:
-        clusters.setdefault(variant_label(item, dimensions), []).append(item)
+        key = variant_key(item, dimensions)
+        if key is not None:
+            clusters.setdefault(key, []).append(item)
     return clusters

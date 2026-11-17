@@ -543,3 +543,12 @@ def filter_comparable(
             allow_lots=allow_lots,
         )
     ]
+
+
+def accepts_damaged(query: str) -> bool:
+    """True when the query itself asks for faulty / spares / for-parts units."""
+    tokens = set(tokenize(query))
+    norm = f" {' '.join(tokenize(query))} "
+    return bool(tokens & DAMAGE_TOKENS) or any(
+        f" {phrase} " in norm for phrase in ("for parts", "for spares", "spares or repair")
+    )

@@ -33,6 +33,7 @@ class MarketItem:
     total_price: float
     shipping_cost: float | None = None
     condition: str = ""
+    condition_id: str = ""
     buying_options: tuple[str, ...] = ()
     image_url: str | None = None
     listed_at: str | None = None
@@ -75,3 +76,6 @@ class SoldItem:
     quantity: int = 1
     aspects: dict[str, str] = field(default_factory=dict)
     is_auction: bool = False
+    condition: str = ""
+    condition_id: str = ""
+    seller: str = ""
