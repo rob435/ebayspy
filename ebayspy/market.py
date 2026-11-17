@@ -19,7 +19,7 @@ from .models import MarketItem
 # only when it independently splits the market (see choose_cluster_dimensions),
 # so a watch is priced per model-line *and* capacity when both matter, but not
 # fragmented on an attribute (e.g. colour) that does not move the price.
-CLUSTER_DIMENSIONS = ("qualifier", "generation", "capacity", "condition", "colour")
+CLUSTER_DIMENSIONS = ("qualifier", "generation", "size", "capacity", "condition", "colour")
 
 # eBay aspect names (lowercased) that authoritatively carry each variant value.
 # "Memory" is deliberately absent: on phones and laptops it is RAM, not storage.
@@ -53,12 +53,13 @@ _MIN_STATED_SHARE = 0.5
 # ...and adding it must keep at least this share of the currently priceable
 # listings priceable: a finer split is worthless if its cells are too thin.
 _MIN_COVERAGE_KEPT = 0.8
-# Model line and generation are product identity, not flavour: a Fenix 5 is not
-# a cheap Fenix 6. Once two of them are each well-populated and materially
+# Model line, generation and size/grade are product identity, not flavour: a
+# Fenix 5 is not a cheap Fenix 6, nor a 60ml bottle a cheap 100ml, nor a PSA 7 a
+# cheap PSA 9. Once two of them are each well-populated and materially
 # apart they are split even if the gap is statistically noisy and even if it
 # leaves thinner ones unpriced — an unpriced listing is honest, a listing
 # "54% under" a blend of other products is a false deal.
-_IDENTITY_DIMENSIONS = frozenset({"qualifier", "generation"})
+_IDENTITY_DIMENSIONS = frozenset({"qualifier", "generation", "size"})
 
 
 def condition_bucket(condition: str = "", condition_id: str = "") -> str:
@@ -274,10 +275,10 @@ def _item_variant(item, dimension: str) -> str | None:
         return condition_bucket(
             getattr(item, "condition", ""), getattr(item, "condition_id", "")
         ) or None
-    elif dimension == "generation":
-        # Relative to the watch's query, so it is stamped on the item by the
-        # service rather than parsed here (see MarketItem.generation).
-        return getattr(item, "generation", "") or None
+    elif dimension in ("generation", "size"):
+        # Relative to the watch's query, so they are stamped on the item by the
+        # service rather than parsed here (see MarketItem.generation / .size).
+        return getattr(item, dimension, "") or None
     return attributes(item.title).get(dimension)  # type: ignore[return-value]
 
 

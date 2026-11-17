@@ -2283,3 +2283,113 @@ def test_no_alerts_against_a_quote_below_the_confidence_floor(tmp_path: Path) ->
         assert _check(service, store, watch_id) >= 1
     finally:
         store.close()
+
+
+# --- regressions from the adversarial review on categories outside electronics ---
+
+
+def test_unpinned_sizes_are_priced_separately(tmp_path: Path) -> None:
+    # A watch that leaves the size open accepts every size. Priced as one market,
+    # every 60ml bottle looks 40% "under" the 100ml ones.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    ebay.market_items = [
+        _market_item(f"a{i}", 78 + i, "Dior Sauvage EDP 100ml Spray") for i in range(7)
+    ] + [_market_item(f"b{i}", 52 + i * 0.5, "Dior Sauvage EDP 60ml Spray") for i in range(6)]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("dior sauvage edp")
+        assert _check(service, store, watch_id) == 0
+        assert store.market_dimensions(watch_id) == ["size"]
+    finally:
+        store.close()
+
+
+def test_part_watch_is_not_priced_off_the_whole_product(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    ebay.market_items = [
+        _market_item(f"c{i}", 48 + i, "Sony PS5 DualSense Wireless Controller White")
+        for i in range(6)
+    ] + [
+        _market_item(f"k{i}", 380 + i, "Sony PS5 Console Disc Edition with 2 Controllers")
+        for i in range(6)
+    ]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("ps5 controller")
+        _check(service, store, watch_id)
+        row = store.get_market_watch(watch_id)
+        assert row["comparable_size"] == 6 and 45 < row["market_price"] < 60
+    finally:
+        store.close()
+
+
+def test_category_consensus_does_not_purge_the_product_for_its_parts(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        parts = [
+            replace(_market_item(f"p{i}", 60 + i, "Fender Stratocaster Neck"),
+                    category_id="P", category_name="Guitar Parts")
+            for i in range(10)
+        ]
+        guitars = [
+            replace(_market_item(f"g{i}", 700 + i, "Fender Stratocaster"),
+                    category_id="G", category_name="Electric Guitars")
+            for i in range(4)
+        ]
+        # Parts are the majority category, but at a tenth of the price they are
+        # not the product: nothing is purged (the price clip deals with them).
+        assert len(service._category_consensus(parts + guitars)) == 14
+        # A watch that itself names a part IS the cheap category.
+        assert len(service._category_consensus(parts + guitars, part_watch=True)) == 10
+        # And a dominant category at the product's own price level still purges.
+        strays = [replace(g, total_price=65.0, item_price=65.0) for g in guitars]
+        assert len(service._category_consensus(parts + strays)) == 10
+    finally:
+        store.close()
+
+
+def test_games_never_become_the_market_of_a_console_watch(tmp_path: Path) -> None:
+    # A price cap hid every console, so only games came back. Nine *different*
+    # games are not "the product"; nothing is priced and nothing alerts.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    games = ["Minecraft", "Super Smash Bros Ultimate", "Zelda Breath of the Wild",
+             "Animal Crossing New Horizons", "Splatoon 3", "Pokemon Scarlet",
+             "Metroid Dread", "Luigis Mansion 3", "Kirby Forgotten Land"]
+    ebay.market_items = [
+        _market_item(f"g{i}", 18 + i * 3, f"{name} Nintendo Switch Game")
+        for i, name in enumerate(games)
+    ]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("nintendo switch", max_price=100)
+        assert _check(service, store, watch_id) == 0
+        assert store.get_market_watch(watch_id)["market_price"] is None
+    finally:
+        store.close()
+
+
+def test_search_uses_the_users_own_words(tmp_path: Path) -> None:
+    # The matcher's internal normal form ("24-70mm" -> "2470mm", "4/102" ->
+    # "4 102") is not something to type into eBay's search box.
+    class Recording(FakeEbay):
+        queries: list[str] = []
+
+        async def search_market(self, query: str, **kwargs) -> list:
+            self.queries.append(query)
+            return []
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = Recording([])
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("sony fe 24-70mm f2.8 gm")
+        _check(service, store, watch_id)
+        assert ebay.queries == ["sony fe 24-70mm f2.8 gm"]
+    finally:
+        store.close()

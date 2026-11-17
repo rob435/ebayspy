@@ -54,6 +54,9 @@ class MarketItem:
     # generation its title states relative to the watch's query ("3" for an
     # "Echo Dot (3rd Gen)" under a watch on "echo dot"; "base" when none stated).
     generation: str = ""
+    # Likewise the size or grade it states where the query leaves it open
+    # ("100ml", "55inch", "psa 9"); "" when the title states none.
+    size: str = ""
 
     @property
     def is_auction(self) -> bool:
@@ -84,3 +87,4 @@ class SoldItem:
     condition_id: str = ""
     seller: str = ""
     generation: str = ""
+    size: str = ""

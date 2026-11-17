@@ -200,8 +200,9 @@ What that buys you:
   (its listing-to-listing spread plus the sampling error of its centre), so a thin or noisy
   market needs a bigger gap before it is called a deal, while a tight, well-sampled one is
   unaffected. Set `MARKET_CONFIDENCE_Z=0` for the plain percentage rule.
-- **Like-for-like variants.** The market is split by model line, **generation**, capacity,
-  **condition** (new / open box / refurbished / used) and colour — but only on a dimension
+- **Like-for-like variants.** The market is split by model line, **generation**, **size or
+  grade** (100ml vs 60ml, 55" vs 65", PSA 9 vs PSA 7), capacity, **condition** (new / open
+  box / refurbished / used) and colour — but only on a dimension
   that most listings state, that moves the price *within* the groups already chosen by more
   than noise, and that does not strand the market in groups too small to price. So a watch on
   `echo dot` prices the 3rd and 4th generation as separate markets, while a phone is not
@@ -239,8 +240,8 @@ hand-labelled as "is this a single working unit of the product, yes or no".
 | --- | --- | --- |
 | Listings correctly kept / dropped — 15 searches used to develop the rules (precision / recall) | 0.85 / 0.90 | 0.97 / 0.99 |
 | Same — 14 **held-out** searches no rule was tuned on | 0.88 / 0.90 | 0.96 / 0.97 |
-| Alerts that were not the product — development searches | 30 of 213 | 5 of 167 |
-| Alerts that were not the product — **held-out** searches | 22 of 145 | 4 of 96 |
+| Alerts that were not the product — development searches | 30 of 213 | 3 of 167 |
+| Alerts that were not the product — **held-out** searches | 22 of 145 | 4 of 94 |
 | Fair value's distance from a perfect-matcher quote, mean — development / held-out | 20% with the old matcher / not measured | 4% / 11% |
 
 What those numbers do and don't say:
@@ -251,9 +252,16 @@ What those numbers do and don't say:
   unpinned edition letter — the X in "Xbox One X" — is a variant); every other figure in that
   row is untouched by it.
 - The labels are one labeller's judgement per row; the crawl is US electronics from 2021 and
-  carries no category, shipping, seller-name or sold data. Other categories are covered only
-  by unit tests and spot checks, not by a labelled corpus — run `ebayspy dryrun` on your own
-  watches before trusting them.
+  carries no category, shipping, seller-name or sold data.
+- **Outside electronics it is weaker, and you should assume so.** An independent reviewer
+  wrote 305 titles across 24 other categories (car parts, guitars, fragrance, trading cards,
+  appliances, coins, books, tools…): the title matcher alone got 83% right, and almost all of
+  its errors were false accepts — a part or accessory whose noun it does not know ("Stand
+  Mixer Dough Hook", "Stratocaster Pickups Set"). The pricing stage contains most of that
+  (anything under 40% of fair value can neither alert nor move the price; categories and
+  price levels are cross-checked), but it is containment, not understanding. Run
+  `ebayspy dryrun` on a new kind of watch, read the rejected and comparable lists, and add
+  `exclude:` words for what gets through.
 - "Not the product" is checkable; "a good deal" is not. Even with a perfect matcher, about a
   quarter of real listings sit 15% or more below their market's centre, which is why a flat
   percentage rule over-alerts and why the confidence gate exists. Nothing here proves that

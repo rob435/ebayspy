@@ -35,15 +35,17 @@ from .market import (
     variant_values,
 )
 from .matching import (
+    MEDIA_TOKENS,
     accepts_damaged,
     attributes,
-    canonicalize,
     content_tokens,
     filter_comparable,
     generation_of,
     lot_quantity,
     match_verdict,
+    names_part,
     register_aliases,
+    size_of,
     specified_dimensions,
     tokenize,
 )
@@ -645,7 +647,7 @@ class EbaySpyService:
         marketplaces = list(dict.fromkeys([home, *extra]))
         if len(marketplaces) < 2:
             return
-        search_query = canonicalize(row["query"])
+        search_query = normalize_market_query(row["query"])
         home_currency = MARKETPLACE_CURRENCY.get(home, "USD")
         quotes: list[tuple[str, float, str]] = []
         for marketplace in marketplaces:
@@ -745,11 +747,16 @@ class EbaySpyService:
         # Stamp each match with the generation its title states relative to this
         # query, so a watch that pins none prices each generation separately.
         matched = [
-            replace(item, generation=generation_of(row["query"], item.title)) for item in matched
+            replace(
+                item,
+                generation=generation_of(row["query"], item.title),
+                size=size_of(row["query"], item.title),
+            )
+            for item in matched
         ]
         if allow_lots or row["category_id"]:
             return matched
-        kept = self._category_consensus(matched)
+        kept = self._category_consensus(matched, part_watch=names_part(row["query"]))
         if rejected is not None and len(kept) != len(matched):
             keeping = {id(item) for item in kept}
             for item in matched:
@@ -781,18 +788,41 @@ class EbaySpyService:
             return accepted
         candidates = filter_comparable(query, flagged, allow_media=True, **rules)
         level = market_price(item.total_price for item in candidates)
-        if not level:
+        if not level or not self._same_product(query, candidates):
             return accepted
+        minimum = self.config.market_min_sample
         base = market_price(item.total_price for item in accepted)
-        if base:
-            if not 0.6 <= level / base <= 1 / 0.6:
-                return accepted
-        elif len(candidates) < self.config.market_min_sample:
+        same_level = (
+            bool(base) and len(accepted) >= minimum and 0.6 <= level / base <= 1 / 0.6
+        )
+        the_market = len(candidates) >= max(minimum, len(accepted))
+        if not (same_level or the_market):
             return accepted
         taken |= {id(item) for item in candidates}
         return [item for item in items if id(item) in taken]
 
-    def _category_consensus(self, items: list) -> list:
+    @staticmethod
+    def _same_product(query: str, items: list) -> bool:
+        """Whether listings look like ONE product rather than many that share a
+        platform. Listings of the same game repeat each other's words beyond
+        the query ("nintendo", "deluxe", the publisher); different games on the
+        watched console share nothing but the console's name."""
+        # The media words themselves ("game", "book") are on every flagged
+        # title by construction, so they say nothing about sameness.
+        ignore = set(tokenize(query)) | MEDIA_TOKENS | {f"{word}s" for word in MEDIA_TOKENS}
+        extra = [
+            {t for t in content_tokens(item.title) if t not in ignore and not t.isdigit()}
+            for item in items
+        ]
+        counts: dict[str, int] = {}
+        for words in extra:
+            for word in words:
+                counts[word] = counts.get(word, 0) + 1
+        if not counts:
+            return True  # nothing but the query's own words: plainly one product
+        return max(counts.values()) >= 0.5 * len(items)
+
+    def _category_consensus(self, items: list, *, part_watch: bool = False) -> list:
         """Drop listings outside the dominant category when one clearly dominates.
 
         Accessories and parts live in their own eBay categories, so once the
@@ -800,6 +830,13 @@ class EbaySpyService:
         usually not the product — a vocabulary-free check that works in any
         niche. Does nothing when no category holds a clear majority (a product
         genuinely split across two) or when the watch pins a category itself.
+
+        One guard: accessories cost less than the thing they fit. If the
+        majority category trades at under half the level of a well-populated
+        minority one, the majority is more likely the accessories that slipped
+        past the matcher than the product — so on a watch for a device nothing
+        is purged, rather than throwing out the real product and pricing its
+        spare parts. (A watch that itself names a part is the cheap category.)
         """
         share = self.config.market_category_consensus
         if share <= 0 or len(items) < self.config.market_min_sample:
@@ -807,6 +844,17 @@ class EbaySpyService:
         cat_id, _name, top = self._dominant_category(items)
         if not cat_id or top < share:
             return items
+        if not part_watch:
+            by_category: dict[str, list[float]] = {}
+            for item in items:
+                by_category.setdefault(getattr(item, "category_id", ""), []).append(
+                    item.total_price
+                )
+            level = market_price(by_category[cat_id]) or 0.0
+            for other, prices in by_category.items():
+                rival = market_price(prices) if other and other != cat_id else None
+                if rival and len(prices) >= 3 and level < 0.5 * rival:
+                    return items
         return [
             item for item in items
             if not getattr(item, "category_id", "") or item.category_id == cat_id
@@ -819,7 +867,7 @@ class EbaySpyService:
         query = row["query"]
         category_ids = row["category_id"] or None
         include_auctions = self._watch_auctions_enabled(row)
-        search_query = canonicalize(query)
+        search_query = normalize_market_query(query)
         limit = self.config.market_sample_size
         items = await self.ebay.search_market(
             search_query,
@@ -953,7 +1001,7 @@ class EbaySpyService:
         any failure so the quote falls back to listings."""
         try:
             sold = await self.ebay.search_item_sales(
-                canonicalize(row["query"]),
+                normalize_market_query(row["query"]),
                 condition=row["condition"],
                 category_ids=row["category_id"] or None,
                 limit=self.config.market_sample_size,

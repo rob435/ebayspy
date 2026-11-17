@@ -116,6 +116,9 @@ ACCESSORY_TOKENS = {
     "replacement", "spare", "part", "backplate", "housing", "chassis", "insert",
     "inlay", "digitizer", "handle", "chuck", "motherboard", "mainboard",
     "band", "charm", "accessory", "connector",
+    # merchandise carrying the product's name, and parts outside electronics
+    "shirt", "tshirt", "tee", "hoodie", "mug", "funko", "pickguard",
+    "tremolo", "saddle", "clasp",
     # common non-English listings (accents are folded: hülle -> hulle)
     "armband", "hulle", "schutzhulle", "schutzfolie", "folie", "ladegerat",
     "ladekabel", "ladecase", "ladestation", "dockingstation", "kabel", "ohrstopsel",
@@ -145,11 +148,12 @@ EXCLUSION_TOKENS = ACCESSORY_TOKENS | DAMAGE_TOKENS | LOT_TOKENS
 REPLICA_TOKENS = {
     "replica", "fake", "clone", "dummy", "homage", "dupe", "proxy", "reprint",
     "inspired", "imitation", "counterfeit", "knockoff", "lookalike", "unbranded",
-    "1:1",
+    "1:1", "moissanite", "simulant", "simulated",
 }
 _REPLICA_PHRASES = [
     ("display", "model"), ("non", "genuine"), ("not", "genuine"), ("knock", "off"),
-    ("look", "alike"), ("fan", "art"),
+    ("look", "alike"), ("fan", "art"), ("lab", "grown"), ("lab", "created"),
+    ("cubic", "zirconia"),
 ]
 _DAMAGE_PHRASES = [
     ("for", "parts"), ("parts", "only"), ("sold", "as", "seen"),
@@ -638,13 +642,17 @@ def _generations(segs: Sequence[str], anchors: frozenset | None = None) -> froze
     return frozenset(out)
 
 
-def _series(segs: Sequence[str]) -> frozenset[tuple[str, str]]:
-    """Edition letters: ("series", "x") for Xbox Series X, ("one", "s") for One S."""
+def _series(tokens: Sequence[str]) -> frozenset[tuple[str, str]]:
+    """Edition letters: ("series", "x") for Xbox Series X, ("one", "s") for One S.
+
+    Works on whole tokens: the letter must stand alone, so the E of "BMW 3
+    Series E46" (a chassis code) is not read as an edition.
+    """
     out = set()
-    for index, seg in enumerate(segs[:-1]):
-        nxt = segs[index + 1]
-        if seg in ("series", "one") and len(nxt) == 1 and nxt.isalpha():
-            out.add((seg, nxt))
+    for index, token in enumerate(tokens[:-1]):
+        nxt = tokens[index + 1]
+        if token in ("series", "one") and len(nxt) == 1 and nxt.isalpha():
+            out.add((token, nxt))
     return frozenset(out)
 
 
@@ -886,7 +894,7 @@ def _doc_from_tokens(tokens: tuple[str, ...]) -> _Doc:
         head_segs=head_segs,
         qualifiers=_qualifiers(head_segs),
         generations=_generations(head_segs),
-        series=_series(head_segs),
+        series=_series(tokens[:extras]),
         capacities=_capacities(text),
         colours=frozenset(canonical_colours(set(tokens) | set(all_segs))),
         volumes_ml=_volumes_ml(text),
@@ -1130,7 +1138,7 @@ def _compile(query: str, extra_excludes: tuple[str, ...], allow_lots: bool) -> _
         join_set=frozenset(t for t in tokens if t.isalpha() and len(t) >= 5),
         qualifiers=_qualifiers(segs),
         generations=_generations(segs),
-        series=_series(segs),
+        series=_series(tokens),
         capacities=doc.capacities,
         colours=doc.colours,
         volumes_ml=doc.volumes_ml,
@@ -1210,6 +1218,20 @@ def _is_accessory_noun(word: str) -> bool:
     return word not in _PART_CONTEXT and not (
         stems.isdisjoint(ACCESSORY_TOKENS) and stems.isdisjoint(_INTEGRAL_COMPONENTS)
     )
+
+
+_SIDE_OPPOSITES = {
+    "front": frozenset({"rear", "back"}), "rear": frozenset({"front"}),
+    "left": frozenset({"right"}), "right": frozenset({"left"}),
+    "upper": frozenset({"lower"}), "lower": frozenset({"upper"}),
+    "nearside": frozenset({"offside"}), "offside": frozenset({"nearside"}),
+    "driver": frozenset({"passenger"}), "passenger": frozenset({"driver"}),
+    "inner": frozenset({"outer"}), "outer": frozenset({"inner"}),
+}
+_BY_VERBS = {
+    "made", "designed", "signed", "built", "manufactured", "sold", "powered",
+    "approved", "written", "published", "illustrated", "edited", "book", "novel",
+}
 
 
 # "screen" is too common in whole-product titles to be an accessory word, but as
@@ -1316,6 +1338,39 @@ def _evaluate(
     if screen_watch and not any(not _stems(t).isdisjoint(_SCREEN_WORDS) for t in tokens):
         return _reject("identity:missing screen")
     part_watch = bool(part_nouns) or screen_watch
+    for word in part_nouns:
+        # ...and it must be what is for sale, not something thrown in with the
+        # whole unit ("PS5 Console with 2 Controllers" is not a controller).
+        at = found.get(word)
+        if at is None or at < 0:
+            continue
+        if doc.extras_explicit and at >= doc.extras_start:
+            return _reject(f"identity:{word} only as an extra")
+        if any(
+            i < at - 1 for i, t in doc.wholes if not _query_word(spec, t)
+        ):
+            return _reject("identity:whole unit")
+
+    # A side the query names is part of what is being bought: front pads are
+    # not rear pads, and "front and rear" is a different (bigger) item.
+    for side, opposites in _SIDE_OPPOSITES.items():
+        if side in spec.token_set and not opposites.isdisjoint(tokens):
+            return _reject(f"variant:side {side}")
+    for index in range(1, len(tokens) - 1):
+        before, word, after = tokens[index - 1], tokens[index], tokens[index + 1]
+        # "Squier by Fender Stratocaster": another make trading on the name.
+        if (
+            word == "by"
+            and _query_word(spec, after)
+            and before.isalpha()
+            and before not in STOPWORDS
+            and before not in _BY_VERBS
+            and not _query_word(spec, before)
+        ):
+            return _reject(f"identity:brand {before}")
+        # "Le Creuset Style Casserole": in the manner of, i.e. not one.
+        if word == "style" and "style" not in spec.token_set and _query_word(spec, before):
+            return _reject("replica:style")
 
     # 4) Accessories, compatibility phrases and larger host products.
     marker = tokens[doc.compat_at] if doc.compat_at >= 0 else ""
@@ -1369,7 +1424,7 @@ def _evaluate(
     # 5) Identity words: generation, series letter, model line, added tiers.
     generations = _generations(doc.head_segs, spec.segs)
     if spec.generations != generations:
-        return _reject(f"identity:generation {sorted(generations) or 'none'}")
+        return _reject(f"identity:generation {' '.join(sorted(generations)) or 'none'}")
     if spec.series != doc.series and (
         spec.series or not all(_query_word(spec, word) for word, _ in doc.series)
     ):
@@ -1487,6 +1542,63 @@ def _added_identity(spec: _Spec, doc: _Doc) -> Verdict | None:
     return None
 
 
+_GENERATION_TOKEN_RE = re.compile(r"^(\d{1,2})[a-z]?$")
+# "<n> <noun>" where the number counts or measures the noun, so it is not the
+# product's generation: "5 Star", "1 Owner", "3 Year Warranty", "6 Inch".
+_COUNTED_NOUNS = {
+    "star", "year", "yr", "owner", "month", "day", "hour", "pack", "piece", "pc",
+    "inch", "in", "speed", "door", "way", "player", "core", "port", "sim", "button",
+    "seater", "tier", "x", "ft", "cm", "mm", "gb", "tb", "kg",
+}
+
+
+def names_part(query: str) -> bool:
+    """Whether the query itself names an accessory or part (so the watch is for
+    that thing — the cheap item in its search — not the device it belongs to)."""
+    spec = _compile(query or "", (), False)
+    return any(_is_accessory_noun(word) for word in spec.content) or (
+        bool(spec.content) and spec.content[-1] in ("screen", "lcd")
+    )
+
+
+def size_of(query: str, title: str) -> str:
+    """The size or grade the title states for the product, where the query
+    leaves it open: "100ml", "55inch", "45mm", "psa 9", "uk 9".
+
+    A watch that pins none of these accepts every size — and a 60ml bottle, a
+    55" set or a PSA 7 must then be priced among its own kind, not as a cheap
+    100ml, 65" or PSA 9. Returns "" when the title states none, or states
+    several (a "60ml + 100ml" set is not either).
+    """
+    spec = _compile(query or "", (), False)
+    doc = _align(spec, _title_doc(title or ""))
+    parts: list[str] = []
+    if not spec.grades and doc.grades:
+        if len(doc.grades) > 1:
+            return ""
+        grader, grade = next(iter(doc.grades))
+        parts.append(f"{grader} {grade}")
+    if not spec.volumes_ml and doc.volumes_ml:
+        distinct = {round(volume) for volume in doc.volumes_ml}
+        if len(distinct) > 1:
+            return ""
+        parts.append(f"{distinct.pop()}ml")
+    if not spec.sizes and doc.sizes:
+        if len({size for _, size in doc.sizes}) > 1:
+            return ""
+        system, size = sorted(doc.sizes)[0]
+        parts.append(f"{system} {size}")
+    measures = _measures(doc.tokens[:doc.extras_start])
+    for unit in ("inch", "mm", "cm"):
+        values = measures.get(unit)
+        if values and unit not in spec.measures:
+            if len(values) > 1:
+                return ""
+            parts.append(f"{next(iter(values))}{unit}")
+            break
+    return " ".join(parts)
+
+
 def generation_of(query: str, title: str) -> str:
     """The generation the title states for the product the query names.
 
@@ -1500,14 +1612,16 @@ def generation_of(query: str, title: str) -> str:
     doc = _align(spec, _title_doc(title or ""))
     head = doc.tokens[:doc.extras_start]
     for i, token in enumerate(head[:-1]):
-        if not (token.isalpha() and _query_word(spec, token)) or token in QUALIFIERS:
+        if not (token.isalpha() and _query_word(spec, token)):
             continue
-        first = _segments(head[i + 1])[0]
+        # The number must be the whole token, bar one model letter ("6S", "7T"):
+        # the 1 of "1TB" and the 6 of "6inch" are measurements, not generations.
+        number = _GENERATION_TOKEN_RE.match(head[i + 1])
         after = head[i + 2] if i + 2 < len(head) else ""
-        if first.isdigit() and 1 <= int(first) <= 20 and not (
-            _is_plural(after) or after in _QTY_NOUNS
+        if number and 1 <= int(number.group(1)) <= 20 and not (
+            _is_plural(after) or after in _QTY_NOUNS or after in _COUNTED_NOUNS
         ):
-            return str(int(first))
+            return str(int(number.group(1)))
     for i, token in enumerate(head):
         if token in ("gen", "generation"):
             for j in (i - 1, i + 1):

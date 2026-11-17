@@ -796,3 +796,40 @@ def test_screen_as_the_query_head_noun_is_a_part_watch() -> None:
     assert not is_comparable("iphone 13 screen", "Apple iPhone 13 128GB Blue Unlocked")
     # ...but only as the head noun: a device described by its screen is a device.
     assert is_comparable("kindle 6 inch screen 2022", "Amazon Kindle 2022 6 inch Screen 16GB")
+
+
+def test_review_regressions_outside_electronics() -> None:
+    from ebayspy.matching import generation_of, names_part, size_of
+
+    # "N Series <chassis code>" is not an edition letter.
+    assert is_comparable("bmw e46 headlight", "BMW 3 Series E46 Saloon Headlight Left Xenon")
+    assert is_comparable("bmw 520d", "BMW 5 Series F10 520d M Sport Saloon 2014")
+    # A part watch wants the part for sale, not thrown in with the whole unit.
+    assert not is_comparable("ps5 controller", "PS5 Console Disc Edition with 2 Controllers")
+    assert not is_comparable("dyson v11 battery", "Dyson V11 Absolute Vacuum with Spare Battery")
+    assert not is_comparable("iphone 13 case", "iPhone 13 128GB Blue with Case")
+    assert is_comparable("iphone 13 case", "OtterBox Defender Case for iPhone 13 Black")
+    # A named side is part of the product.
+    assert not is_comparable("front brake pads golf mk7", "VW Golf MK7 Rear Brake Pads Set")
+    assert is_comparable("front brake pads golf mk7", "VW Golf MK7 Front Brake Pads Set")
+    # Another make trading on the name; "in the style of"; stones that are not diamonds.
+    assert not is_comparable("fender stratocaster", "Squier by Fender Stratocaster Affinity")
+    assert is_comparable("beats solo3", "Beats by Dr. Dre Solo3 Wireless Headphones Black")
+    assert not is_comparable("le creuset casserole", "Le Creuset Style Cast Iron Casserole 24cm")
+    assert not is_comparable("1ct diamond ring", "1ct Moissanite Engagement Ring 18k White Gold")
+    assert not is_comparable("nike air max 90", "Nike Air Max 90 T-Shirt Mens Large Graphic Tee")
+    assert is_comparable("ford f-150", "Ford F150 Pickup")
+    # Generation stamping ignores counts and measurements.
+    assert generation_of("echo dot", "Amazon Echo Dot 5 Star Rated Seller 4th Gen") == "4"
+    assert generation_of("echo dot", "Echo Dot 3 Year Warranty Smart Speaker") == "base"
+    assert generation_of("xbox one", "Microsoft Xbox One 1TB Console") == "base"
+    assert generation_of("kindle paperwhite", "Kindle Paperwhite 6 Inch 8GB") == "base"
+    assert generation_of("airpods pro", "Apple AirPods Pro 2 with MagSafe Case") == "2"
+    assert generation_of("garmin fenix", "Garmin Fenix 6S Pro Sapphire") == "6"
+    # Sizes and grades a query leaves open are surfaced for pricing.
+    assert size_of("dior sauvage edp", "Dior Sauvage EDP 100ml Spray") == "100ml"
+    assert size_of("dior sauvage edp", "Dior Sauvage EDP 60ml + 100ml Set") == ""
+    assert size_of("dior sauvage edp 100ml", "Dior Sauvage EDP 100ml Spray") == ""  # pinned
+    assert size_of("lg c3 oled", "LG C3 OLED 65 inch 4K TV") == "65inch"
+    assert size_of("charizard base set 4/102", "Charizard Base Set 4/102 Holo PSA 9") == "psa 9"
+    assert names_part("ps5 controller") and not names_part("iphone 13")

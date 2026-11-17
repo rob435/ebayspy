@@ -90,9 +90,9 @@ def _replay(name: str) -> tuple[Counter, Counter, list[str]]:
 @pytest.mark.parametrize(
     ("name", "min_deal_precision", "min_match_precision", "min_match_recall"),
     [
-        # measured: 162 genuine / 5 wrong alerts (0.970); matching P 0.966 R 0.994
+        # measured: 164 genuine / 3 wrong alerts (0.982); matching P 0.968 R 0.993
         ("real_listings.json", 0.95, 0.95, 0.97),
-        # measured (held out): 92 genuine / 4 wrong alerts (0.958); matching P 0.963 R 0.972
+        # measured (held out): 90 genuine / 4 wrong alerts (0.957); matching P 0.963 R 0.974
         ("real_listings_holdout.json", 0.93, 0.94, 0.95),
     ],
 )
