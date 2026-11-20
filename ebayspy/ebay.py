@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -47,6 +48,45 @@ MARKETPLACE_CURRENCY = {
 # eBay condition IDs for the optional per-watch condition filter.
 CONDITION_IDS = {"new": "1000", "used": "3000"}
 
+# Structured item detail (aspects, ePID…) barely changes over a listing's life,
+# so it is fetched once and reused; a failed lookup is remembered briefly so a
+# listing getItem cannot serve doesn't burn a call on every check.
+_DETAIL_TTL_SECONDS = 7 * 86400
+_DETAIL_FAILURE_TTL_SECONDS = 6 * 3600
+_DETAIL_CACHE_MAX = 5000
+# Rate-limit circuit breaker: after a 429, fail fast until eBay's Retry-After.
+_DEFAULT_RETRY_AFTER_SECONDS = 60.0
+_MAX_RETRY_AFTER_SECONDS = 900.0
+
+
+class EbayRateLimited(RuntimeError):
+    """eBay answered 429 (or we are still backing off from one)."""
+
+
+class MarketSample(list):
+    """Search results plus ``total``, the number of listings eBay says match
+    (None if it did not say). ``total > len(sample)`` means the sample is a
+    window onto a bigger market."""
+
+    total: int | None = None
+
+
+def _retry_after_seconds(header: str | None) -> float:
+    """Seconds to back off for a Retry-After header, which may be a number of
+    seconds or an HTTP date; clamped to a sane range."""
+    wait = _to_float(header)
+    if wait is None and header:
+        try:
+            when = parsedate_to_datetime(header)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            wait = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            wait = None
+    if wait is None:
+        wait = _DEFAULT_RETRY_AFTER_SECONDS
+    return min(max(wait, 1.0), _MAX_RETRY_AFTER_SECONDS)
+
 
 def _to_float(value: object) -> float | None:
     try:
@@ -77,7 +117,15 @@ class EbayClient:
         self.global_id = global_id
         self.max_items = max_items
         self.detail_concurrency = max(1, detail_concurrency)
+        # Optional tap on raw search payloads (the dry run records them for replay).
+        self.on_search = None
         self._oauth_tokens: dict[str, tuple[str, float]] = {}
+        # item_id -> (expires_at monotonic, detail fields or None for a failure)
+        self._detail_cache: dict[str, tuple[float, dict | None]] = {}
+        # OAuth scope -> monotonic time until which calls fail fast. Per scope:
+        # Marketplace Insights has its own (smaller) quota, and running out of
+        # it must not silence the Browse calls that seller monitoring needs.
+        self._backoff_until: dict[str, float] = {}
         self.client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={
@@ -109,30 +157,82 @@ class EbayClient:
         """
         if limit <= 0 or not items:
             return items
+        now = time.monotonic()
+        missing = [
+            item for item in items
+            if (cached := self._detail_cache.get(item.item_id)) is None or cached[0] <= now
+        ][:limit]
         semaphore = asyncio.Semaphore(self.detail_concurrency)
 
-        async def enrich(item: MarketItem) -> MarketItem:
+        async def fetch(item: MarketItem) -> None:
             async with semaphore:
                 try:
                     detail = await self._get_item_by_legacy_id(item.item_id)
+                except EbayRateLimited:
+                    return  # not the listing's fault: retry once the limit lifts
                 except Exception:
                     log.debug("Could not hydrate market item %s", item.item_id, exc_info=True)
-                    return item
-            aspects = {
-                str(aspect.get("name")): str(aspect.get("value"))
-                for aspect in detail.get("localizedAspects") or []
-                if aspect.get("name") and aspect.get("value") is not None
+                    self._remember_detail(item.item_id, None, _DETAIL_FAILURE_TTL_SECONDS)
+                    return
+            fields = {
+                "epid": str(detail.get("epid") or ""),
+                "gtin": str(detail.get("gtin") or ""),
+                "mpn": str(detail.get("mpn") or ""),
+                "aspects": {
+                    str(aspect.get("name")): str(aspect.get("value"))
+                    for aspect in detail.get("localizedAspects") or []
+                    if aspect.get("name") and aspect.get("value") is not None
+                },
             }
-            return replace(
-                item,
-                epid=str(detail.get("epid") or ""),
-                gtin=str(detail.get("gtin") or ""),
-                mpn=str(detail.get("mpn") or ""),
-                aspects=aspects,
-            )
+            self._remember_detail(item.item_id, fields, _DETAIL_TTL_SECONDS)
 
-        head = await asyncio.gather(*(enrich(item) for item in items[:limit]))
-        return [*head, *items[limit:]]
+        if missing:
+            await asyncio.gather(*(fetch(item) for item in missing))
+        hydrated = []
+        for item in items:
+            cached = self._detail_cache.get(item.item_id)
+            hydrated.append(replace(item, **cached[1]) if cached and cached[1] else item)
+        return hydrated
+
+    def _remember_detail(self, item_id: str, fields: dict | None, ttl: float) -> None:
+        self._detail_cache.pop(item_id, None)  # re-insert so eviction is oldest-first
+        self._detail_cache[item_id] = (time.monotonic() + ttl, fields)
+        while len(self._detail_cache) > _DETAIL_CACHE_MAX:
+            self._detail_cache.pop(next(iter(self._detail_cache)))
+
+    async def _api_get(
+        self,
+        url: str,
+        *,
+        params: dict,
+        marketplace: str | None = None,
+        scope: str = BASE_SCOPE,
+    ) -> httpx.Response:
+        """GET with the three failure modes a long-lived poller must survive:
+
+        * 401 — the cached token was revoked early: drop it and retry once;
+        * 429 — out of quota: remember eBay's Retry-After and fail fast until
+          then instead of spending more calls to be told no;
+        * 5xx — a transient gateway error: one short retry.
+        """
+        if time.monotonic() < self._backoff_until.get(scope, 0.0):
+            raise EbayRateLimited("eBay API rate limit hit; backing off")
+        response = None
+        for attempt in range(2):
+            headers = await self._authorized_headers(marketplace, scope)
+            response = await self.client.get(url, headers=headers, params=params)
+            if response.status_code == 401 and attempt == 0:
+                self._oauth_tokens.pop(scope, None)
+                continue
+            if response.status_code == 429:
+                wait = _retry_after_seconds(response.headers.get("Retry-After"))
+                self._backoff_until[scope] = time.monotonic() + wait
+                raise EbayRateLimited(f"eBay API rate limit hit; backing off {wait:.0f}s")
+            if response.status_code >= 500 and attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            break
+        return response
 
     async def search_market(
         self,
@@ -146,7 +246,7 @@ class EbayClient:
         include_auctions: bool = False,
         category_ids: str | None = None,
         marketplace: str | None = None,
-    ) -> list[MarketItem]:
+    ) -> MarketSample:
         """Sample live listings matching a keyword query.
 
         Defaults to eBay Best Match (``sort=None``), which ranks the actual
@@ -158,7 +258,6 @@ class EbayClient:
         current bid); ``category_ids`` and ``marketplace`` narrow/redirect the
         search.
         """
-        headers = await self._authorized_headers(marketplace)
         currency = self._marketplace_currency(marketplace)
         options = "FIXED_PRICE|AUCTION" if include_auctions else "FIXED_PRICE"
         filters = [f"buyingOptions:{{{options}}}"]
@@ -179,18 +278,22 @@ class EbayClient:
             params["category_ids"] = category_ids
         if sort:
             params["sort"] = sort
-        response = await self.client.get(BROWSE_SEARCH_URL, headers=headers, params=params)
+        response = await self._api_get(BROWSE_SEARCH_URL, params=params, marketplace=marketplace)
         if response.status_code != 200:
             raise RuntimeError(
                 f"eBay Browse API market search failed ({response.status_code}): "
                 f"{self._error_text(response)}"
             )
         payload = response.json()
-        items = [
-            self._market_item_from_summary(summary, currency)
+        if self.on_search is not None:
+            self.on_search(query, payload)
+        sample = MarketSample(
+            item
             for summary in payload.get("itemSummaries") or []
-        ]
-        return [item for item in items if item is not None]
+            if (item := self._market_item_from_summary(summary, currency)) is not None
+        )
+        sample.total = _to_int(payload.get("total"))
+        return sample
 
     async def seller_exists(self, seller: str) -> bool | None:
         try:
@@ -281,13 +384,11 @@ class EbayClient:
         }
 
     async def _search_seller_listings(self, seller: str) -> list[Listing]:
-        headers = await self._authorized_headers()
         # The Browse API rejects a search with no query criterion, so category_ids=0
         # (the root category) is paired with the seller filter to list everything a
         # seller has. buyingOptions keeps auction listings, which are otherwise dropped.
-        response = await self.client.get(
+        response = await self._api_get(
             BROWSE_SEARCH_URL,
-            headers=headers,
             params={
                 "category_ids": "0",
                 "filter": f"sellers:{{{seller}}},buyingOptions:{{FIXED_PRICE|AUCTION}}",
@@ -340,11 +441,8 @@ class EbayClient:
         ]
 
     async def _get_item_by_legacy_id(self, item_id: str) -> dict:
-        headers = await self._authorized_headers()
-        response = await self.client.get(
-            BROWSE_ITEM_BY_LEGACY_ID_URL,
-            headers=headers,
-            params={"legacy_item_id": item_id},
+        response = await self._api_get(
+            BROWSE_ITEM_BY_LEGACY_ID_URL, params={"legacy_item_id": item_id}
         )
         if response.status_code != 200:
             raise RuntimeError(
@@ -395,7 +493,6 @@ class EbayClient:
         app is not entitled the OAuth/search call raises and the caller falls
         back to the live-listing estimate.
         """
-        headers = await self._authorized_headers(marketplace, scope=INSIGHTS_SCOPE)
         currency = self._marketplace_currency(marketplace)
         filters = []
         condition_ids = CONDITION_IDS.get((condition or "").strip().lower())
@@ -406,7 +503,9 @@ class EbayClient:
             params["filter"] = ",".join(filters)
         if category_ids:
             params["category_ids"] = category_ids
-        response = await self.client.get(INSIGHTS_SALES_URL, headers=headers, params=params)
+        response = await self._api_get(
+            INSIGHTS_SALES_URL, params=params, marketplace=marketplace, scope=INSIGHTS_SCOPE
+        )
         if response.status_code != 200:
             raise RuntimeError(
                 f"eBay Marketplace Insights search failed ({response.status_code}): "
@@ -432,6 +531,10 @@ class EbayClient:
             currency=str(price.get("currency") or currency),
             sold_date=summary.get("lastSoldDate"),
             quantity=_to_int(summary.get("totalSoldQuantity")) or 1,
+            is_auction="AUCTION" in (summary.get("buyingOptions") or ()),
+            condition=str(summary.get("condition") or ""),
+            condition_id=str(summary.get("conditionId") or ""),
+            seller=str((summary.get("seller") or {}).get("username") or ""),
         )
 
     def _market_item_from_summary(self, summary: dict, currency: str) -> MarketItem | None:
@@ -469,6 +572,7 @@ class EbayClient:
             total_price=effective + (shipping_cost or 0.0),
             shipping_cost=shipping_cost,
             condition=str(summary.get("condition") or ""),
+            condition_id=str(summary.get("conditionId") or ""),
             buying_options=buying_options,
             image_url=(summary.get("image") or {}).get("imageUrl"),
             listed_at=summary.get("itemCreationDate"),

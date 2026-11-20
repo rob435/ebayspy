@@ -33,6 +33,7 @@ class MarketItem:
     total_price: float
     shipping_cost: float | None = None
     condition: str = ""
+    condition_id: str = ""
     buying_options: tuple[str, ...] = ()
     image_url: str | None = None
     listed_at: str | None = None
@@ -49,6 +50,13 @@ class MarketItem:
     gtin: str = ""
     mpn: str = ""
     aspects: dict[str, str] = field(default_factory=dict)
+    # Set by the service once the listing is matched to a watch: the product
+    # generation its title states relative to the watch's query ("3" for an
+    # "Echo Dot (3rd Gen)" under a watch on "echo dot"; "base" when none stated).
+    generation: str = ""
+    # Likewise the size or grade it states where the query leaves it open
+    # ("100ml", "55inch", "psa 9"); "" when the title states none.
+    size: str = ""
 
     @property
     def is_auction(self) -> bool:
@@ -75,3 +83,8 @@ class SoldItem:
     quantity: int = 1
     aspects: dict[str, str] = field(default_factory=dict)
     is_auction: bool = False
+    condition: str = ""
+    condition_id: str = ""
+    seller: str = ""
+    generation: str = ""
+    size: str = ""

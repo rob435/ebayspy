@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from .models import Listing, MarketItem
+from .pricing import FairValue
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ def _truncate_html(text: str, limit: int) -> str:
         clipped = clipped[:newline]
     if clipped.rfind("<") > clipped.rfind(">"):  # don't end inside a tag
         clipped = clipped[: clipped.rfind("<")]
+    ampersand = clipped.rfind("&")
+    if ampersand > clipped.rfind(";") and len(clipped) - ampersand < 10:
+        clipped = clipped[:ampersand]  # nor inside an entity such as &amp;
     return clipped.rstrip() + "…"
 
 EBAY_DOMAINS = {
@@ -119,6 +123,20 @@ def _spec_line(aspects: dict[str, str]) -> str:
             seen.add(entry[1])
             bits.append(entry[1])
     return " · ".join(bits[:4])
+
+
+_EVIDENCE_NAMES = {"asks": "asking", "cleared": "ended", "sold": "sold"}
+
+
+def _evidence_line(quote: FairValue | None, currency: str) -> str:
+    """What the fair value rests on, e.g. "From 28 asking £430 · 9 ended £405"."""
+    if quote is None or not quote.components:
+        return ""
+    return "From " + " · ".join(
+        f"{part.n} {_EVIDENCE_NAMES.get(part.source, part.source)} "
+        f"{format_money(part.price, currency)}"
+        for part in quote.components
+    )
 
 
 def format_seller_rating(percent: object, score: object) -> str:
@@ -403,6 +421,8 @@ class TelegramBot:
         lot_quantity: int | None = None,
         vision: str = "",
         offer_estimate: float | None = None,
+        quote: FairValue | None = None,
+        quick_profit: float | None = None,
     ) -> None:
         saving = market_price - item.total_price
         cur = item.currency
@@ -431,7 +451,15 @@ class TelegramBot:
             market_label = f"📊 Market ≈ {html.escape(format_money(market_price, cur))}"
             if variant:
                 market_label += f" for {html.escape(variant)}"
-            if distribution:
+            if quote is not None:
+                # The interval is our uncertainty about fair value, not the
+                # spread of listings — a wide one means "treat this with care".
+                market_label += (
+                    f" (likely {html.escape(format_money(quote.low, cur))}"
+                    f"–{html.escape(format_money(quote.high, cur))}"
+                    f", {quote.confidence}% confidence)"
+                )
+            elif distribution:
                 low, _mid, high = distribution
                 market_label += (
                     f" (range {html.escape(format_money(low, cur))}"
@@ -470,10 +498,19 @@ class TelegramBot:
             market_label,
             save_line,
         ]
+        evidence = _evidence_line(quote, cur) if not lot_quantity else ""
+        if evidence:
+            parts.append(f"🧮 {html.escape(evidence)}")
         if profit is not None:
             roi_text = f" ({roi:+.0f}% ROI)" if roi is not None else ""
+            quick_text = (
+                f" · {html.escape(format_money(quick_profit, item.currency))} if sold fast"
+                if quick_profit is not None
+                else ""
+            )
             parts.append(
-                f"💵 Est. flip profit ≈ {html.escape(format_money(profit, item.currency))}{roi_text}"
+                f"💵 Est. flip profit ≈ {html.escape(format_money(profit, item.currency))}"
+                f"{roi_text}{quick_text}"
             )
         if comps:
             joined = " · ".join(format_money(price, item.currency) for price in comps)
