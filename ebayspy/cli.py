@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import subprocess
+from pathlib import Path
 from datetime import datetime
 
 from . import wake
@@ -36,6 +38,23 @@ def build_parser() -> argparse.ArgumentParser:
         "wakepoll", help="One poll, then arm the next wake (run by the wakepoll LaunchAgent)"
     )
     subparsers.add_parser("status", help="Show the last check status for each seller")
+
+    dry = subparsers.add_parser(
+        "dryrun",
+        help="Price one market and show the working (no alerts sent, nothing saved)",
+    )
+    dry.add_argument("query", help="Search terms, e.g. 'sony wh-1000xm5'")
+    dry.add_argument("--condition", choices=["new", "used"])
+    dry.add_argument("--discount", type=int, help="Discount %% under fair value that's a deal")
+    dry.add_argument("--under", type=float, help="Max price to consider")
+    dry.add_argument("--category", help="Numeric eBay category id to focus on")
+    dry.add_argument("--exclude", action="append", default=[], help="Word to exclude (repeatable)")
+    dry.add_argument("--auctions", action="store_true", help="Include auctions")
+    dry.add_argument("--lots", action="store_true", help="Include job lots / bundles")
+    dry.add_argument("--record", metavar="FILE", help="Save the live search for later replay")
+    dry.add_argument("--replay", metavar="FILE", help="Re-run a recorded search (no API calls)")
+    dry.add_argument("--json", action="store_true", help="Print the full report as JSON")
+    dry.add_argument("--show", type=int, default=15, help="Rows to print per section")
 
     backup = subparsers.add_parser("backup", help="Write a timestamped DB snapshot")
     backup.add_argument("--dir", help="Destination directory (default: BACKUP_DIR)")
@@ -81,6 +100,26 @@ def build_parser() -> argparse.ArgumentParser:
     market_remove.add_argument("id", type=int)
     market_sub.add_parser("list", help="List market watches")
     return parser
+
+
+async def _dryrun(config: Config, args: argparse.Namespace) -> None:
+    from .dryrun import dry_run, format_report
+
+    recording = json.loads(Path(args.replay).read_text()) if args.replay else None
+    report = await dry_run(
+        config,
+        args.query,
+        condition=args.condition,
+        discount=args.discount,
+        max_price=args.under,
+        category=args.category,
+        exclude=tuple(args.exclude),
+        auctions=args.auctions,
+        lots=args.lots,
+        recording=recording,
+        record_to=Path(args.record) if args.record else None,
+    )
+    print(json.dumps(report, indent=1) if args.json else format_report(report, show=args.show))
 
 
 async def _run_once(config: Config) -> None:
@@ -160,6 +199,8 @@ def main() -> None:
         asyncio.run(_run_once(config))
     elif args.command == "wakepoll":
         asyncio.run(_wakepoll(config))
+    elif args.command == "dryrun":
+        asyncio.run(_dryrun(config, args))
     elif args.command == "status":
         store = Store(config.sqlite_path)
         try:

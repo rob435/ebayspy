@@ -53,6 +53,7 @@ class FakeDiscord:
         self.listings: list[tuple[str, str]] = []
         self.ended: list[tuple[str, str]] = []
         self.deals: list[tuple[str, str, float]] = []
+        self.deal_details: list[dict] = []
         self.price_drops: list[tuple[str, str, float, float]] = []
         self.messages: list[tuple[str, str, dict | None]] = []
         self.edits: list[tuple[str, int, str, dict | None]] = []
@@ -108,8 +109,15 @@ class FakeDiscord:
         lot_quantity: int | None = None,
         vision: str = "",
         offer_estimate: float | None = None,
+        quote=None,
+        quick_profit: float | None = None,
     ) -> None:
         self.deals.append((channel_id, item.item_id, item.total_price))
+        self.deal_details.append(
+            {"item_id": item.item_id, "market_price": market_price, "quote": quote,
+             "profit": profit, "quick_profit": quick_profit, "variant": variant,
+             "offer_estimate": offer_estimate}
+        )
 
 
 class FlakyDiscord(FakeDiscord):
@@ -194,6 +202,12 @@ def _service_config() -> SimpleNamespace:
         market_health_threshold=5,
         market_risk_warn=40,
         market_risk_max=100,
+        market_confidence_z=1.0,
+        market_min_confidence=10,
+        market_cleared_window_days=30,
+        market_verify_ended_limit=3,
+        market_category_consensus=0.7,
+        market_resale_shipping=0.0,
         fx_rates=(),
         ebay_global_id="EBAY-GB",
         market_aliases=(),
@@ -752,7 +766,7 @@ def _market_item(item_id: str, total: float, title: str) -> MarketItem:
         item_id=item_id,
         title=title,
         url=f"https://example.test/itm/{item_id}",
-        seller="seller",
+        seller=f"seller-{item_id}",
         currency="GBP",
         item_price=total,
         total_price=total,
@@ -826,10 +840,12 @@ def test_market_watcher_survives_one_watch_failing(tmp_path: Path) -> None:
 def test_check_market_watch_caps_alerts_per_cycle(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     ebay = FakeEbay([])
-    # Ten genuine deals plus enough at-market items to anchor the median at 100.
+    # Ten genuine deals among a market that clearly trades at 100. (Deals must
+    # be the minority: if half of all listings sat at 60, that would be a second
+    # price level, not ten bargains.)
     title = "Acme Widget X1 Gadget"
     ebay.market_items = [_market_item(f"deal-{i}", 60, title) for i in range(10)]
-    ebay.market_items += [_market_item(f"mkt-{i}", 100, title) for i in range(10)]
+    ebay.market_items += [_market_item(f"mkt-{i}", 100, title) for i in range(30)]
     service = _market_service(store, ebay)
     service.config.market_max_deals_per_cycle = 3
     try:
@@ -940,6 +956,8 @@ def test_channels_for_watch_owner_vs_broadcast(tmp_path: Path) -> None:
     service = _market_service(store, FakeEbay([]))
     service.config.discord_allowed_channel_ids = ("admin-1",)
     try:
+        store.add_allowed_username("niner")
+        store.add_channel("user-9", "niner")
         owned = store.add_market_watch("iphone 13", owner_chat_id="user-9")
         seeded = store.add_market_watch("ps5")  # no owner
 
@@ -951,6 +969,9 @@ def test_channels_for_watch_owner_vs_broadcast(tmp_path: Path) -> None:
         assert service._channels_for_watch(owned_row, broadcast) == ["user-9", "admin-1"]
         # Ownerless watch -> broadcast to everyone.
         assert service._channels_for_watch(seeded_row, broadcast) == broadcast
+        # An owner who is later uninvited stops receiving their watch's alerts.
+        store.remove_allowed_username("niner")
+        assert service._channels_for_watch(owned_row, broadcast) == ["admin-1"]
     finally:
         store.close()
 
@@ -981,7 +1002,9 @@ def test_insights_overrides_price_with_sold_median(tmp_path: Path) -> None:
         assert {item_id for _, item_id, _ in service.discord.deals} == {"real"}
         assert sent == 1
         row = store.get_market_watch(watch_id)
-        assert 360 <= row["market_price"] <= 366  # sold median, not the ~402 live asking
+        # Led by the ~362 sold median, not the ~402 live asking. (Six sales are
+        # thin evidence, so the asks still pull the estimate up a couple of percent.)
+        assert 360 <= row["market_price"] <= 375
     finally:
         store.close()
 
@@ -1677,5 +1700,705 @@ def test_handle_refimage_set_show_clear(tmp_path: Path) -> None:
         assert "Usage" in service._handle_refimage("")
         assert "No market watch" in service._handle_refimage("9999 https://img.test/x.jpg")
         assert "image URL" in service._handle_refimage(f"{watch_id} not-a-url")
+    finally:
+        store.close()
+
+
+# --- fair-value engine in the watch flow --------------------------------------
+
+
+def _check(service: EbaySpyService, store: Store, watch_id: int) -> int:
+    return asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
+
+
+def _alerted(service: EbaySpyService) -> list[str]:
+    return [item_id for _, item_id, _ in service.discord.deals]
+
+
+def test_scam_listings_do_not_block_real_deals(tmp_path: Path) -> None:
+    # Five all-red-flag listings rank above a genuine deal. They are suppressed
+    # without being recorded, so if the per-cycle cap were taken BEFORE the risk
+    # screen they would fill every slot on every check and the real deal would
+    # never be sent.
+    from dataclasses import replace
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 100 + i % 3, title) for i in range(12)]
+    ebay.market_items += [
+        replace(
+            _market_item(f"scam{i}", 45, title),
+            seller_feedback_score=2, seller_feedback_percent=80.0, item_location="CN",
+        )
+        for i in range(5)
+    ]
+    ebay.market_items.append(_market_item("real", 80, title))
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        assert _check(service, store, watch_id) == 1
+        assert _alerted(service) == ["real"]
+    finally:
+        store.close()
+
+
+def test_deal_alert_carries_the_quote_and_both_exit_prices(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 195 + i, title) for i in range(10)]
+    ebay.market_items.append(_market_item("great", 150, title))
+    service = _market_service(store, ebay)
+    service.config.market_resale_shipping = 5.0
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        assert _check(service, store, watch_id) == 1
+        detail = service.discord.deal_details[0]
+        quote = detail["quote"]
+        assert quote.low < quote.price < quote.high
+        assert [part.source for part in quote.components] == ["asks"]
+        # Profit is net of fees AND the postage you pay; a fast sale earns less.
+        assert detail["quick_profit"] < detail["profit"]
+        expected = quote.price * (1 - 12.8 / 100) - 0.30 - 5.0 - 150
+        assert abs(detail["profit"] - expected) < 1e-6
+        row = store.get_market_watch(watch_id)
+        assert row["market_low"] < row["market_price"] < row["market_high"]
+        assert 0 < row["market_confidence"] <= 50  # asking prices alone
+    finally:
+        store.close()
+
+
+def test_ended_listings_feed_the_fair_value(tmp_path: Path) -> None:
+    import json
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Sony WH-1000XM5 Headphones"
+    # Sellers are asking ~244; eight comparable listings ended last week at ~226.
+    ebay.market_items = [_market_item(f"a{i}", 240 + i, title) for i in range(8)]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("sony wh-1000xm5")
+        store.record_market_sightings(
+            watch_id,
+            [
+                (f"gone{i}", "", 222 + i, "GBP", None, title, f"old-{i}",
+                 json.dumps({"qualifier": "base"}))
+                for i in range(8)
+            ],
+        )
+        store.conn.execute(
+            "update market_listings set ended_at = datetime('now', '-3 days'), "
+            "last_seen_at = datetime('now', '-3 days'), ended_confirmed = 1 "
+            "where item_id like 'gone%'"
+        )
+        store.conn.commit()
+        _check(service, store, watch_id)
+        row = store.get_market_watch(watch_id)
+        # Fair value sits nearer what cleared than what is still unsold, and
+        # having transaction proxies lifts confidence above asks-only (≤ 50).
+        assert 226 < row["market_price"] < 236
+        assert row["market_confidence"] > 50
+        reply = asyncio.run(service.handle_command("chat-1", None, "/quote", str(watch_id)))
+        assert "ended" in reply and "asks" in reply and "alerts at or below" in reply
+    finally:
+        store.close()
+
+
+def test_ended_listing_blocked_by_user_stops_counting(tmp_path: Path) -> None:
+    import json
+
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        watch_id = store.add_market_watch("sony wh-1000xm5")
+        store.record_market_sightings(
+            watch_id,
+            [("gone", "", 200, "GBP", None, "Sony WH-1000XM5", "s", json.dumps({"qualifier": "base"})),
+             ("case", "", 15, "GBP", None, "Sony WH-1000XM5 Carry Case", "s2",
+              json.dumps({"qualifier": "base"}))],
+        )
+        store.conn.execute(
+            "update market_listings set ended_at = datetime('now', '-1 days'), ended_confirmed = 1"
+        )
+        store.conn.commit()
+        row = store.get_market_watch(watch_id)
+        # The accessory is re-screened by today's matcher, not trusted on file.
+        assert [o.price for o in service._cleared_observations(row, [])[""]] == [200]
+        store.block_market_item(watch_id, "gone")
+        assert service._cleared_observations(row, []) == {}
+    finally:
+        store.close()
+
+
+def test_for_parts_condition_is_never_a_comparable(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 198 + i, title) for i in range(8)]
+    # A clean title, 40% under market — but eBay's condition says it is for parts.
+    ebay.market_items.append(
+        replace(_market_item("parts", 120, title),
+                condition="For parts or not working", condition_id="7000")
+    )
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        assert _check(service, store, watch_id) == 0
+        assert store.get_market_watch(watch_id)["comparable_size"] == 8
+    finally:
+        store.close()
+
+
+def test_listing_with_unknown_variant_is_not_priced_as_one(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    items = [_market_item(f"a{i}", 300 + i, "Apple iPhone 13 128GB") for i in range(6)]
+    items += [_market_item(f"b{i}", 400 + i, "Apple iPhone 13 256GB") for i in range(6)]
+    # No capacity in the title: these could be either. Their own mixed bucket
+    # would have a median of 400 and make every 300 one look 25% under market.
+    for i, price in enumerate([300, 300, 300, 300, 400, 400, 400, 400, 500, 500, 500, 500]):
+        items.append(_market_item(f"x{i}", price, "Apple iPhone 13 Unlocked"))
+    ebay.market_items = items
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13")
+        assert _check(service, store, watch_id) == 0
+        assert store.market_dimensions(watch_id) == ["capacity"]
+    finally:
+        store.close()
+
+
+def test_category_consensus_drops_listings_filed_elsewhere(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Sony A7 III Camera"
+    ebay.market_items = [
+        replace(_market_item(f"c{i}", 1000 + i, title), category_id="31388",
+                category_name="Digital Cameras")
+        for i in range(10)
+    ]
+    # Same words, 30% cheaper, but filed under camera accessories.
+    ebay.market_items.append(
+        replace(_market_item("stray", 700, title), category_id="999", category_name="Accessories")
+    )
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("sony a7 iii")
+        assert _check(service, store, watch_id) == 0
+        service.config.market_category_consensus = 0.0  # off: the stray is a "deal"
+        assert _check(service, store, watch_id) == 1
+        assert _alerted(service) == ["stray"]
+    finally:
+        store.close()
+
+
+def test_truncated_sample_confirms_an_ending_before_counting_it(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 200 + i, title) for i in range(6)]
+    service = _market_service(store, ebay)
+    service.config.market_sample_size = 6  # a full page: a window, not the market
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+
+        def absent_listing():
+            store.record_market_sightings(watch_id, [("old", "", 190, "GBP", None)])
+            store.conn.execute(
+                "update market_listings set last_seen_at = datetime('now', '-2 days'), "
+                "ended_at = null where item_id = 'old'"
+            )
+            store.conn.commit()
+
+        def ended_at():
+            return store.conn.execute(
+                "select ended_at from market_listings where item_id = 'old'"
+            ).fetchone()[0]
+
+        # Slid out of the window but still live on eBay: NOT an ending.
+        absent_listing()
+        ebay.item_active_response = True
+        _check(service, store, watch_id)
+        assert ended_at() is None
+        # eBay cannot say right now: leave it undecided rather than guess.
+        absent_listing()
+        ebay.item_active_response = None
+        _check(service, store, watch_id)
+        assert ended_at() is None
+        # Confirmed gone: now it is an ending.
+        ebay.item_active_response = False
+        _check(service, store, watch_id)
+        assert ended_at() is not None
+    finally:
+        store.close()
+
+
+def test_auction_keeps_turbo_polling_after_its_heads_up(tmp_path: Path) -> None:
+    # The heads-up fires ~19 minutes out. On the next (turbo) check the item is
+    # already alerted — turbo must stay armed or the final call is never seen.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    items = [_market_item(f"fix-{i}", 400 + i, "Apple iPhone 13") for i in range(6)]
+    items.append(_auction("snipe", 300, ends_in=1150))
+    ebay.market_items = items
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13", include_auctions=True)
+        assert _check(service, store, watch_id) == 1
+        assert service._auction_turbo.get(watch_id) == 45
+        assert _check(service, store, watch_id) == 0  # no repeat alert...
+        assert service._auction_turbo.get(watch_id) == 45  # ...but still on turbo
+    finally:
+        store.close()
+
+
+def test_few_bids_only_relax_the_bar_near_the_close(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    items = [_market_item(f"f{i}", 400 + i, "Apple iPhone 13") for i in range(6)]
+    # 5% under market with no bids — but two days from ending, when "no bids"
+    # just means nobody has bothered yet.
+    items.append(_auction("early", 380, ends_in=172800, bid_count=0))
+    ebay.market_items = items
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13", include_auctions=True)
+        assert _check(service, store, watch_id) == 0
+    finally:
+        store.close()
+
+
+def test_observe_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    fresh = Listing(
+        item_id="222222222222", seller="seller_one", title="Brand new",
+        price="GBP 9.00", url="https://example.test/itm/222222222222",
+    )
+    service = _observe_service(store, FakeEbay([fresh]))
+    service.discord = FlakyDiscord()
+    try:
+        store.add_observed_seller("seller_one")
+        store.record_observe_check("seller_one", new_count=0)  # past the silent seed
+        assert asyncio.run(service._observe_seller("seller_one", ["chat-1"])) == 0
+        assert not store.is_seen("222222222222")  # not lost: still pending
+        service.discord.fail = False
+        assert asyncio.run(service._observe_seller("seller_one", ["chat-1"])) == 1
+        assert service.discord.listings == [("chat-1", "222222222222")]
+    finally:
+        store.close()
+
+
+def test_health_notice_is_sent_as_plain_text(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        asyncio.run(service._notify_text(["chat-1"], "watch “m&s <jumper>” failed: <html>502"))
+        assert service.discord.messages[0][1] == (
+            "watch “m&s <jumper>” failed: <html>502"
+        )
+    finally:
+        store.close()
+
+
+def test_quote_command_usage_and_unknown_id(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        assert "Usage" in asyncio.run(service.handle_command("chat-1", None, "/quote", ""))
+        assert "No market watch" in asyncio.run(
+            service.handle_command("chat-1", None, "/quote", "99")
+        )
+    finally:
+        store.close()
+
+
+def test_price_drop_alert_retried_after_send_failure(tmp_path: Path) -> None:
+    # A drop whose alert could not be delivered must still look like a drop on
+    # the next poll; overwriting the stored price would silently lose it.
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.discord = FlakyDiscord()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        item = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                       price="GBP 100.00", url="https://example.test/itm/111111111111")
+        store.mark_seen(item, notified=False)
+        store.upsert_active_listings([item])
+        store.record_check("seller_one", listing_count=1, new_count=0)
+        cheaper = Listing(item_id="111111111111", seller="seller_one", title="Widget",
+                          price="GBP 80.00", url="https://example.test/itm/111111111111")
+        service.ebay = FakeEbay([cheaper])
+
+        assert asyncio.run(service.check_once()) == 0  # Telegram down
+        service.discord.fail = False
+        assert asyncio.run(service.check_once()) == 1  # retried, not lost
+        assert service.discord.price_drops == [("chat-1", "111111111111", 100.0, 80.0)]
+        assert asyncio.run(service.check_once()) == 0  # and then deduped as usual
+    finally:
+        store.close()
+
+
+def test_poll_where_every_seller_fails_is_not_recorded_as_healthy(tmp_path: Path) -> None:
+    import httpx
+
+    class TimingOut(FakeEbay):
+        async def seller_listings(self, seller: str, *, hydrate: bool = True) -> list[Listing]:
+            raise httpx.ReadTimeout("")  # str() of this is empty
+
+    store = Store(tmp_path / "test.sqlite3")
+    service = object.__new__(EbaySpyService)
+    service.config = _service_config()
+    service.store = store
+    service.discord = FakeDiscord()
+    service.stop_event = asyncio.Event()
+    service._check_lock = asyncio.Lock()
+    try:
+        store.add_seller("seller_one")
+        service.ebay = TimingOut([])
+        asyncio.run(service.check_once())
+        assert store.get_meta("last_poll_ok_at") is None  # /health must not say "healthy"
+        assert store.status_rows()[0]["last_error"] == "ReadTimeout"  # nor /status "ok"
+        service.ebay = FakeEbay([])
+        asyncio.run(service.check_once())
+        assert store.get_meta("last_poll_ok_at")
+    finally:
+        store.close()
+
+
+def test_rename_probe_runs_at_most_daily(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        assert service._rename_probe_due("Seller_One") is True
+        assert service._rename_probe_due("seller_one") is False  # same seller, same day
+        stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        store.set_meta("seller_rename_probe_at:seller_one", stale)
+        assert service._rename_probe_due("seller_one") is True
+    finally:
+        store.close()
+
+
+# --- regressions found by independent review of the fair-value commit ----------
+
+
+def test_only_confirmed_endings_count_as_price_evidence(tmp_path: Path) -> None:
+    import json
+
+    class CountingEbay(FakeEbay):
+        asked: list[str] = []
+
+        async def item_active(self, item_id: str) -> bool | None:
+            self.asked.append(item_id)
+            return self.item_active_response
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = CountingEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 97 + i, title) for i in range(8)]
+    service = _market_service(store, ebay)
+    service.config.market_verify_ended_limit = 10
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        # Eight dearer listings vanish from the sample — e.g. the user narrowed
+        # the watch to a category. They are still live on eBay.
+        store.record_market_sightings(
+            watch_id,
+            [(f"gone{i}", "", 135 + i, "GBP", None, title, f"o{i}",
+              json.dumps({"qualifier": "base"})) for i in range(8)],
+        )
+        store.conn.execute(
+            "update market_listings set last_seen_at = datetime('now', '-2 days')"
+        )
+        store.conn.commit()
+        row = store.get_market_watch(watch_id)
+
+        ebay.item_active_response = None  # eBay cannot say: absence alone proves nothing
+        _check(service, store, watch_id)
+        assert service._cleared_observations(row, []) == {}
+        assert abs(store.get_market_watch(watch_id)["market_price"] - 100.5) < 1
+
+        ebay.item_active_response = True  # confirmed still live: never evidence...
+        _check(service, store, watch_id)
+        assert service._cleared_observations(row, []) == {}
+        asked = len(ebay.asked)
+        _check(service, store, watch_id)
+        assert len(ebay.asked) == asked  # ...and not asked about again
+        stats = store.market_demand_stats(watch_id, 14)
+        assert stats["ended_in_window"] == 0  # nor counted as sold by the demand read
+    finally:
+        store.close()
+
+
+def test_confirmed_ending_becomes_price_evidence(tmp_path: Path) -> None:
+    import json
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 97 + i, title) for i in range(8)]
+    service = _market_service(store, ebay)
+    service.config.market_verify_ended_limit = 10
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        store.record_market_sightings(
+            watch_id,
+            [(f"gone{i}", "", 88 + i, "GBP", None, title, f"o{i}",
+              json.dumps({"qualifier": "base"})) for i in range(4)],
+        )
+        store.conn.execute(
+            "update market_listings set last_seen_at = datetime('now', '-2 days')"
+        )
+        store.conn.commit()
+        ebay.item_active_response = False  # getItem says they ended
+        _check(service, store, watch_id)
+        row = store.get_market_watch(watch_id)
+        assert len(service._cleared_observations(row, [])[""]) == 4
+        _check(service, store, watch_id)  # the next check prices with them
+        assert store.get_market_watch(watch_id)["market_price"] < 100
+    finally:
+        store.close()
+
+
+def test_stuck_dimension_is_released_when_listings_stop_stating_it(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    ebay.market_items = [
+        _market_item(f"x{i}", 300 + i, "Apple iPhone 13 Unlocked") for i in range(12)
+    ]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("apple iphone 13")
+        store.set_market_dimensions(watch_id, ["capacity"])  # chosen on an earlier sample
+        _check(service, store, watch_id)
+        # Holding on to "capacity" would leave all twelve unpriced, forever.
+        assert store.market_dimensions(watch_id) == []
+        assert store.get_market_watch(watch_id)["market_price"] is not None
+    finally:
+        store.close()
+
+
+def test_mute_survives_the_label_gaining_a_dimension() -> None:
+    muted = {"128gb"}
+    assert EbaySpyService._is_muted("128gb", muted)
+    assert EbaySpyService._is_muted("128gb · used", muted)  # market later split by condition
+    assert EbaySpyService._is_muted("pro · 128gb · used", muted)
+    assert not EbaySpyService._is_muted("256gb · used", muted)
+    assert not EbaySpyService._is_muted("", muted)
+    assert EbaySpyService._is_muted("", {""})
+
+
+def test_quote_shows_the_alert_price_the_alerts_actually_use(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Dyson Airblade HU02 Hand Dryer"
+    ebay.market_items = [_market_item(f"m{i}", 200 + i % 3, title) for i in range(30)]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("dyson airblade hu02")
+        plain = asyncio.run(service.handle_command("chat-1", None, "/quote", str(watch_id)))
+        store.bump_discount_nudge(watch_id, 8.0, -10.0, 10.0)  # 👎 feedback: 15% -> 23%
+        nudged = asyncio.run(service.handle_command("chat-1", None, "/quote", str(watch_id)))
+        assert "alerts at or below £170.85" in plain
+        assert "alerts at or below £154.77" in nudged
+    finally:
+        store.close()
+
+
+def test_turbo_polling_is_cleared_by_a_failed_check(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        watch_id = store.add_market_watch("apple iphone 13", include_auctions=True)
+        service._auction_turbo[watch_id] = 45  # armed by an earlier check
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("search failed")
+
+        service.ebay.search_market = boom
+        _check(service, store, watch_id)
+        assert watch_id not in service._auction_turbo
+    finally:
+        store.close()
+
+
+def test_media_word_is_judged_by_price_level(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    service = _market_service(store, ebay)
+    try:
+        # A watch for a GAME: half the listings say "Game", and cost the same as
+        # the half that don't. They are the product.
+        ebay.market_items = [
+            _market_item(f"a{i}", 34 + i, "Mario Kart 8 Deluxe (Nintendo Switch, 2017)")
+            for i in range(5)
+        ] + [
+            _market_item(f"b{i}", 35 + i, "Mario Kart 8 Deluxe - Nintendo Switch Game - Sealed")
+            for i in range(5)
+        ]
+        game = store.add_market_watch("mario kart 8 deluxe")
+        _check(service, store, game)
+        assert store.get_market_watch(game)["comparable_size"] == 10
+
+        # A watch for a CONSOLE: the games cost a fraction of it. They stay out.
+        ebay.market_items = [
+            _market_item(f"c{i}", 250 + i, "Nintendo Switch Console 32GB Neon") for i in range(8)
+        ] + [
+            _market_item(f"g{i}", 35 + i, "Zelda Breath of the Wild Nintendo Switch Game")
+            for i in range(6)
+        ]
+        console = store.add_market_watch("nintendo switch")
+        _check(service, store, console)
+        assert store.get_market_watch(console)["comparable_size"] == 8
+
+        # A watch where EVERY listing says "Book": the product is a book.
+        ebay.market_items = [
+            _market_item(f"k{i}", 9 + i * 0.2, "Atomic Habits by James Clear Paperback Book")
+            for i in range(6)
+        ]
+        book = store.add_market_watch("atomic habits")
+        _check(service, store, book)
+        assert store.get_market_watch(book)["comparable_size"] == 6
+    finally:
+        store.close()
+
+
+def test_no_alerts_against_a_quote_below_the_confidence_floor(tmp_path: Path) -> None:
+    # Six listings scattered over a 4x range: something is priced, but with so
+    # little confidence that "40% under" means nothing. It is quoted, not traded.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    title = "Garmin Fenix GPS Watch"
+    prices = [150, 240, 330, 450, 520, 610]
+    ebay.market_items = [_market_item(f"m{i}", p, title) for i, p in enumerate(prices)]
+    service = _market_service(store, ebay)
+    service.config.market_confidence_z = 0.0  # isolate the confidence floor
+    service.config.market_min_confidence = 15
+    try:
+        watch_id = store.add_market_watch("garmin fenix")
+        assert _check(service, store, watch_id) == 0
+        row = store.get_market_watch(watch_id)
+        assert row["market_price"] is not None and row["market_confidence"] < 15
+        service.config.market_min_confidence = 0  # floor off: the cheap one alerts
+        assert _check(service, store, watch_id) >= 1
+    finally:
+        store.close()
+
+
+# --- regressions from the adversarial review on categories outside electronics ---
+
+
+def test_unpinned_sizes_are_priced_separately(tmp_path: Path) -> None:
+    # A watch that leaves the size open accepts every size. Priced as one market,
+    # every 60ml bottle looks 40% "under" the 100ml ones.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    ebay.market_items = [
+        _market_item(f"a{i}", 78 + i, "Dior Sauvage EDP 100ml Spray") for i in range(7)
+    ] + [_market_item(f"b{i}", 52 + i * 0.5, "Dior Sauvage EDP 60ml Spray") for i in range(6)]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("dior sauvage edp")
+        assert _check(service, store, watch_id) == 0
+        assert store.market_dimensions(watch_id) == ["size"]
+    finally:
+        store.close()
+
+
+def test_part_watch_is_not_priced_off_the_whole_product(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    ebay.market_items = [
+        _market_item(f"c{i}", 48 + i, "Sony PS5 DualSense Wireless Controller White")
+        for i in range(6)
+    ] + [
+        _market_item(f"k{i}", 380 + i, "Sony PS5 Console Disc Edition with 2 Controllers")
+        for i in range(6)
+    ]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("ps5 controller")
+        _check(service, store, watch_id)
+        row = store.get_market_watch(watch_id)
+        assert row["comparable_size"] == 6 and 45 < row["market_price"] < 60
+    finally:
+        store.close()
+
+
+def test_category_consensus_does_not_purge_the_product_for_its_parts(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store = Store(tmp_path / "test.sqlite3")
+    service = _market_service(store, FakeEbay([]))
+    try:
+        parts = [
+            replace(_market_item(f"p{i}", 60 + i, "Fender Stratocaster Neck"),
+                    category_id="P", category_name="Guitar Parts")
+            for i in range(10)
+        ]
+        guitars = [
+            replace(_market_item(f"g{i}", 700 + i, "Fender Stratocaster"),
+                    category_id="G", category_name="Electric Guitars")
+            for i in range(4)
+        ]
+        # Parts are the majority category, but at a tenth of the price they are
+        # not the product: nothing is purged (the price clip deals with them).
+        assert len(service._category_consensus(parts + guitars)) == 14
+        # A watch that itself names a part IS the cheap category.
+        assert len(service._category_consensus(parts + guitars, part_watch=True)) == 10
+        # And a dominant category at the product's own price level still purges.
+        strays = [replace(g, total_price=65.0, item_price=65.0) for g in guitars]
+        assert len(service._category_consensus(parts + strays)) == 10
+    finally:
+        store.close()
+
+
+def test_games_never_become_the_market_of_a_console_watch(tmp_path: Path) -> None:
+    # A price cap hid every console, so only games came back. Nine *different*
+    # games are not "the product"; nothing is priced and nothing alerts.
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = FakeEbay([])
+    games = ["Minecraft", "Super Smash Bros Ultimate", "Zelda Breath of the Wild",
+             "Animal Crossing New Horizons", "Splatoon 3", "Pokemon Scarlet",
+             "Metroid Dread", "Luigis Mansion 3", "Kirby Forgotten Land"]
+    ebay.market_items = [
+        _market_item(f"g{i}", 18 + i * 3, f"{name} Nintendo Switch Game")
+        for i, name in enumerate(games)
+    ]
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("nintendo switch", max_price=100)
+        assert _check(service, store, watch_id) == 0
+        assert store.get_market_watch(watch_id)["market_price"] is None
+    finally:
+        store.close()
+
+
+def test_search_uses_the_users_own_words(tmp_path: Path) -> None:
+    # The matcher's internal normal form ("24-70mm" -> "2470mm", "4/102" ->
+    # "4 102") is not something to type into eBay's search box.
+    class Recording(FakeEbay):
+        queries: list[str] = []
+
+        async def search_market(self, query: str, **kwargs) -> list:
+            self.queries.append(query)
+            return []
+
+    store = Store(tmp_path / "test.sqlite3")
+    ebay = Recording([])
+    service = _market_service(store, ebay)
+    try:
+        watch_id = store.add_market_watch("sony fe 24-70mm f2.8 gm")
+        _check(service, store, watch_id)
+        assert ebay.queries == ["sony fe 24-70mm f2.8 gm"]
     finally:
         store.close()

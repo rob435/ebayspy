@@ -153,3 +153,17 @@ def format_timestamp(value: str | None) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
     parsed = parsed.astimezone(timezone.utc)
     return f"{parsed.day} {parsed:%b %Y}, {parsed:%H:%M} UTC"
+
+
+_EVIDENCE_NAMES = {"asks": "asking", "cleared": "ended", "sold": "sold"}
+
+
+def evidence_line(quote, currency: str) -> str:
+    """What the fair value rests on, e.g. "From 28 asking £430 · 9 ended £405"."""
+    if quote is None or not quote.components:
+        return ""
+    return "From " + " · ".join(
+        f"{part.n} {_EVIDENCE_NAMES.get(part.source, part.source)} "
+        f"{format_money(part.price, currency)}"
+        for part in quote.components
+    )

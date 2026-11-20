@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
+import statistics
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import NamedTuple
 
 from . import demand as demand_metrics
 from . import insights as insights_metrics
+from . import pricing
 from . import risk as risk_metrics
 from . import semantic
 from . import vision
@@ -17,22 +21,30 @@ from .fx import FxConverter
 from .market import (
     choose_cluster_dimensions,
     cluster_by_variant,
+    condition_bucket,
+    deal_threshold,
     discount_percent_for,
     estimate_resale_profit,
     find_arbitrage,
     find_deals,
+    label_from_values,
     market_price,
     offer_candidates,
-    price_distribution,
-    variant_label,
+    variant_key,
+    variant_values,
 )
 from .matching import (
+    MEDIA_TOKENS,
+    accepts_damaged,
     attributes,
-    canonicalize,
     content_tokens,
     filter_comparable,
+    generation_of,
     lot_quantity,
+    match_verdict,
+    names_part,
     register_aliases,
+    size_of,
     specified_dimensions,
     tokenize,
 )
@@ -57,6 +69,7 @@ from .storage import (
     parse_price_floor,
     passes_min_price,
 )
+from .formatting import format_money
 from .discord_bot import Button, ButtonRows, DiscordBot
 
 log = logging.getLogger(__name__)
@@ -84,15 +97,39 @@ class _Deal(NamedTuple):
     # For "offer" candidates: the estimated accepted-offer price (the list price
     # itself is not the deal). None for every other stage.
     offer_estimate: float | None = None
+    # The fair value the deal was judged against (carries its uncertainty).
+    quote: pricing.FairValue | None = None
+
+
+@dataclass
+class _Snapshot:
+    """One check's view of a watched market, from raw sample to quotes."""
+
+    items: list[MarketItem]  # everything the search returned
+    comparable: list[MarketItem]  # the watched product (fixed-price + auctions)
+    fixed: list[MarketItem]
+    auctions: list[MarketItem]
+    dimensions: list[str]  # variant dimensions the market is split on
+    clusters: dict[str, list[MarketItem]]  # fixed-price listings per variant
+    truncated: bool  # the search returned a full page (a window, not the market)
+    quotes: dict[str, pricing.FairValue] = field(default_factory=dict)
+    sold_tag: str | None = None  # real sales-velocity read, when available
+    comps: dict[str, list[float]] = field(default_factory=dict)  # recent sold prices
+    rejected: dict[str, str] = field(default_factory=dict)  # item_id -> why (dry run)
 
 
 class EbaySpyService:
-    def __init__(self, config: Config) -> None:
-        config.require_discord()
-        config.require_ebay()
+    def __init__(self, config: Config, *, store=None, ebay=None, discord=None) -> None:
+        """Wire the service. Collaborators can be injected (a dry run uses an
+        in-memory store, a replayed or live eBay client and a recording
+        Discord); credentials are only required for the ones built here."""
+        if discord is None:
+            config.require_discord()
+        if ebay is None:
+            config.require_ebay()
         self.config = config
-        self.store = Store(config.sqlite_path)
-        self.ebay = EbayClient(
+        self.store = store if store is not None else Store(config.sqlite_path)
+        self.ebay = ebay if ebay is not None else EbayClient(
             app_id=config.ebay_app_id,
             client_secret=config.ebay_client_secret,
             global_id=config.ebay_global_id,
@@ -100,7 +137,7 @@ class EbaySpyService:
             max_items=config.max_items_per_seller,
             detail_concurrency=config.detail_concurrency,
         )
-        self.discord = DiscordBot(
+        self.discord = discord if discord is not None else DiscordBot(
             config.discord_bot_token,
             ebay_global_id=config.ebay_global_id,
             send_images=config.discord_send_images,
@@ -227,7 +264,10 @@ class EbaySpyService:
 
     def _record_poll_health(self, alert_count: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self.store.set_meta("last_poll_ok_at", now)
+        # A poll in which every seller errored is not a healthy poll: leave the
+        # "last ok" stamp alone so /health and the heartbeat show the outage.
+        if not getattr(self, "_poll_all_failed", False):
+            self.store.set_meta("last_poll_ok_at", now)
         self.store.set_meta("last_poll_alert_count", str(alert_count))
         if alert_count > 0:
             self.store.set_meta("last_alert_at", now)
@@ -274,6 +314,8 @@ class EbaySpyService:
             )
 
         total_alert_count = 0
+        failed_sellers = 0
+        self._poll_all_failed = False
         for seller_index, seller in enumerate(sellers):
             if seller_index and self.config.seller_check_delay_seconds > 0:
                 try:
@@ -291,7 +333,12 @@ class EbaySpyService:
                 listings = await self.ebay.seller_listings(seller)
             except Exception as exc:
                 log.exception("Failed checking seller %s", seller)
-                self.store.record_check(seller, listing_count=0, new_count=0, error=str(exc))
+                self.store.record_check(
+                    seller, listing_count=0, new_count=0,
+                    error=str(exc) or exc.__class__.__name__,
+                )
+                failed_sellers += 1
+                self._poll_all_failed = failed_sellers == len(sellers)
                 continue
 
             current_seller = await self._detect_username_change(seller, listings, channels)
@@ -323,6 +370,10 @@ class EbaySpyService:
                 # starts fresh rather than being flooded with the whole backlog.
                 self.store.mark_seen(listing, notified=notified)
 
+            # Items whose restock / price-drop alert failed to send keep their old
+            # stored value, so the next poll sees the change again and retries.
+            undelivered_restock: set[str] = set()
+            undelivered_drop: set[str] = set()
             if not first_scan:
                 for listing, previous_quantity, current_quantity in (
                     self.store.quantity_increase_candidates(listings)
@@ -334,6 +385,8 @@ class EbaySpyService:
                     )
                     if sent:
                         total_alert_count += 1
+                    elif channels:
+                        undelivered_restock.add(listing.item_id)
 
                 # Price drops are read BEFORE upsert_active_listings overwrites the
                 # stored price; the floor is recorded only on a successful send so a
@@ -351,6 +404,8 @@ class EbaySpyService:
                     if sent:
                         self.store.mark_price_drop_alerted(listing.item_id, new_price)
                         total_alert_count += 1
+                    elif channels:
+                        undelivered_drop.add(listing.item_id)
 
                 if not listings_truncated:
                     for listing, last_seen_at in self.store.ended_candidates(
@@ -386,7 +441,9 @@ class EbaySpyService:
                             # a failed send is retried on the next poll.
                             self.store.mark_ended_notified(listing.item_id)
 
-            self.store.upsert_active_listings(listings)
+            self.store.upsert_active_listings(
+                listings, keep_price=undelivered_drop, keep_quantity=undelivered_restock
+            )
             self.store.record_check(seller, len(listings), seller_new_count, seller_ended_count)
             log.info(
                 "Checked %s: %s active listings, %s new alerted, %s ended alerted",
@@ -458,7 +515,9 @@ class EbaySpyService:
             listings = await self.ebay.seller_listings(seller, hydrate=False)
         except Exception as exc:
             log.exception("Failed observing seller %s", seller)
-            self.store.record_observe_check(seller, new_count=0, error=str(exc))
+            self.store.record_observe_check(
+                seller, new_count=0, error=str(exc) or exc.__class__.__name__
+            )
             return 0
 
         min_price = self.store.get_observed_min_price(seller)
@@ -482,9 +541,12 @@ class EbaySpyService:
             ]
             for listing in await self.ebay.hydrate_listings(to_alert):
                 sent = await self._notify_channels(channels, listing)
-                self.store.mark_seen(listing, notified=sent)
-                if sent:
-                    sent_count += 1
+                if not sent:
+                    # Leave it unseen so the next pass retries the alert instead
+                    # of silently losing it to a transient Discord failure.
+                    continue
+                self.store.mark_seen(listing, notified=True)
+                sent_count += 1
         self.store.record_observe_check(seller, new_count=sent_count)
         log.info(
             "Observed %s: %s active listings, %s new alerted", seller, len(listings), sent_count
@@ -556,11 +618,18 @@ class EbaySpyService:
         owner = row["owner_chat_id"]
         if not owner:
             return broadcast
-        channels = [owner]
+        # An owner who has since been uninvited must stop receiving alerts.
+        channels = [owner] if self._channel_still_authorized(owner) else []
         for admin in self.config.discord_allowed_channel_ids:
             if admin not in channels:
                 channels.append(admin)
         return channels
+
+    def _channel_still_authorized(self, channel_id: str) -> bool:
+        if channel_id == self.config.discord_channel_id:
+            return True
+        usernames = {str(r["channel_id"]): r["username"] for r in self.store.list_channel_rows()}
+        return self.is_authorized_channel(channel_id, usernames.get(channel_id))
 
     def _home_marketplace(self) -> str:
         return self.config.ebay_global_id.upper().replace("-", "_")
@@ -585,15 +654,19 @@ class EbaySpyService:
         marketplaces = list(dict.fromkeys([home, *extra]))
         if len(marketplaces) < 2:
             return
-        search_query = canonicalize(row["query"])
+        search_query = normalize_market_query(row["query"])
+        home_currency = MARKETPLACE_CURRENCY.get(home, "USD")
         quotes: list[tuple[str, float, str]] = []
         for marketplace in marketplaces:
+            currency = MARKETPLACE_CURRENCY.get(marketplace, "USD")
             try:
+                # The watch's price bounds are in the home currency; each
+                # marketplace filters in its own.
                 items = await self.ebay.search_market(
                     search_query,
                     condition=row["condition"],
-                    min_price=row["min_price"],
-                    max_price=row["max_price"],
+                    min_price=self._convert_bound(row["min_price"], home_currency, currency),
+                    max_price=self._convert_bound(row["max_price"], home_currency, currency),
                     limit=self.config.market_sample_size,
                     category_ids=row["category_id"] or None,
                     marketplace=marketplace,
@@ -601,28 +674,17 @@ class EbaySpyService:
             except Exception:
                 log.warning("Arbitrage search failed for %s on %s", row["query"], marketplace)
                 continue
-            fixed = [
-                item
-                for item in filter_comparable(
-                    row["query"],
-                    items,
-                    extra_excludes=self._watch_exclude_terms(row),
-                    coverage=self.config.market_match_coverage,
-                    fuzzy_threshold=self.config.market_fuzzy_threshold,
-                    semantic_threshold=self._semantic_threshold(),
-                )
-                if not item.is_auction
-            ]
+            fixed = [item for item in self._comparable(row, items) if not item.is_auction]
             price = market_price(item.total_price for item in fixed)
             if price is not None and len(fixed) >= self.config.market_min_sample:
-                quotes.append((marketplace, price, MARKETPLACE_CURRENCY.get(marketplace, "USD")))
+                quotes.append((marketplace, price, currency))
         if len(quotes) < 2:
             return
         result = find_arbitrage(
             quotes,
             self.fx.convert,
             self.config.market_arbitrage_threshold,
-            MARKETPLACE_CURRENCY.get(home, "USD"),
+            home_currency,
         )
         if result:
             for channel_id in channels:
@@ -631,32 +693,205 @@ class EbaySpyService:
                 except Exception:
                     log.exception("Failed sending arbitrage alert to %s", channel_id)
 
+    def _convert_bound(self, value: float | None, frm: str, to: str) -> float | None:
+        """A price bound in another marketplace's currency (None = unbounded,
+        including when the rate is unknown — better no bound than a wrong one)."""
+        if value is None or frm == to:
+            return value
+        return self.fx.convert(value, frm, to)
+
     def _watch_exclude_terms(self, row) -> list[str]:
         raw = row["exclude_terms"] or ""
         return [term.strip() for term in raw.split(",") if term.strip()]
 
-    async def _sample_market(self, row):
-        """Search, narrow to comparable listings, and split them into priceable
-        per-variant clusters.
+    def _comparable(
+        self,
+        row,
+        items: list,
+        *,
+        allow_lots: bool = False,
+        rejected: dict[str, str] | None = None,
+    ) -> list:
+        """Listings that are the watched product: the title matcher, minus what
+        the user blocked, minus for-parts units (unless the watch hunts them),
+        minus strays from outside the product's dominant eBay category.
 
-        Returns (sampled, comparable, clusters, dimension). ``clusters`` maps a
-        variant label to the listings of that variant; pricing and deal detection
-        run per cluster so different colours/capacities never blend into one
-        meaningless median. Persists the headline (largest variant) figure for
-        /watches.
+        Pass ``rejected`` to have it filled with item_id -> why each dropped
+        listing was dropped (used by the dry run; costs nothing otherwise).
         """
+        rules = {
+            "extra_excludes": self._watch_exclude_terms(row),
+            "coverage": self.config.market_match_coverage,
+            "fuzzy_threshold": self.config.market_fuzzy_threshold,
+            "allow_lots": allow_lots,
+        }
+        blocked = self.store.blocked_item_ids(row["id"])
+        wants_damaged = accepts_damaged(row["query"])
+        matched = []
+        text_ok = filter_comparable(
+            row["query"], items, semantic_threshold=self._semantic_threshold(), **rules
+        )
+        text_ok = self._reinstate_media(row["query"], items, text_ok, rules)
+        for item in text_ok:
+            if item.item_id in blocked:
+                reason = "blocked: flagged not-the-item"
+            elif not wants_damaged and condition_bucket(
+                getattr(item, "condition", ""), getattr(item, "condition_id", "")
+            ) == "parts":
+                reason = "condition: for parts or not working"
+            else:
+                matched.append(item)
+                continue
+            if rejected is not None:
+                rejected[item.item_id] = reason
+        if rejected is not None:
+            passed = {id(item) for item in text_ok}
+            for item in items:
+                if id(item) not in passed:
+                    rejected[item.item_id] = match_verdict(
+                        row["query"], item.title, **rules
+                    ).reason
+        # Stamp each match with the generation its title states relative to this
+        # query, so a watch that pins none prices each generation separately.
+        matched = [
+            replace(
+                item,
+                generation=generation_of(row["query"], item.title),
+                size=size_of(row["query"], item.title),
+            )
+            for item in matched
+        ]
+        if allow_lots or row["category_id"]:
+            return matched
+        kept = self._category_consensus(matched, part_watch=names_part(row["query"]))
+        if rejected is not None and len(kept) != len(matched):
+            keeping = {id(item) for item in kept}
+            for item in matched:
+                if id(item) not in keeping:
+                    rejected[item.item_id] = (
+                        f"category: filed under “{getattr(item, 'category_name', '')}”, "
+                        "not the market's main category"
+                    )
+        return kept
+
+    def _reinstate_media(self, query: str, items: list, accepted: list, rules: dict) -> list:
+        """Give listings rejected only for saying "game" or "book" a second look.
+
+        On a console watch "… Switch Game" is media *for* the product; on a
+        watch for a game it *is* the product. No title rule can tell which, but
+        prices can: games trade at a fraction of the console, whereas listings
+        of the watched game cost the same whether or not their title happens to
+        say "Game". So media-flagged listings that pass every other rule are
+        taken back when they trade at the level of the accepted ones (or, when
+        nothing else was accepted, when there are enough of them to be a market).
+        """
+        taken = {id(item) for item in accepted}
+        flagged = [
+            item for item in items
+            if id(item) not in taken
+            and match_verdict(query, item.title, **rules).reason.startswith("media:")
+        ]
+        if not flagged:
+            return accepted
+        candidates = filter_comparable(query, flagged, allow_media=True, **rules)
+        level = market_price(item.total_price for item in candidates)
+        if not level or not self._same_product(query, candidates):
+            return accepted
+        minimum = self.config.market_min_sample
+        base = market_price(item.total_price for item in accepted)
+        same_level = (
+            bool(base) and len(accepted) >= minimum and 0.6 <= level / base <= 1 / 0.6
+        )
+        the_market = len(candidates) >= max(minimum, len(accepted))
+        if not (same_level or the_market):
+            return accepted
+        taken |= {id(item) for item in candidates}
+        return [item for item in items if id(item) in taken]
+
+    @staticmethod
+    def _same_product(query: str, items: list) -> bool:
+        """Whether listings look like ONE product rather than many that share a
+        platform. Listings of the same game repeat each other's words beyond
+        the query ("nintendo", "deluxe", the publisher); different games on the
+        watched console share nothing but the console's name."""
+        # The media words themselves ("game", "book") are on every flagged
+        # title by construction, so they say nothing about sameness.
+        ignore = set(tokenize(query)) | MEDIA_TOKENS | {f"{word}s" for word in MEDIA_TOKENS}
+        extra = [
+            {t for t in content_tokens(item.title) if t not in ignore and not t.isdigit()}
+            for item in items
+        ]
+        counts: dict[str, int] = {}
+        for words in extra:
+            for word in words:
+                counts[word] = counts.get(word, 0) + 1
+        if not counts:
+            return True  # nothing but the query's own words: plainly one product
+        return max(counts.values()) >= 0.5 * len(items)
+
+    def _category_consensus(self, items: list, *, part_watch: bool = False) -> list:
+        """Drop listings outside the dominant category when one clearly dominates.
+
+        Accessories and parts live in their own eBay categories, so once the
+        title matcher has narrowed the sample, a listing filed somewhere else is
+        usually not the product — a vocabulary-free check that works in any
+        niche. Does nothing when no category holds a clear majority (a product
+        genuinely split across two) or when the watch pins a category itself.
+
+        One guard: accessories cost less than the thing they fit. If the
+        majority category trades at under half the level of a well-populated
+        minority one, the majority is more likely the accessories that slipped
+        past the matcher than the product — so on a watch for a device nothing
+        is purged, rather than throwing out the real product and pricing its
+        spare parts. (A watch that itself names a part is the cheap category.)
+        """
+        share = self.config.market_category_consensus
+        if share <= 0 or len(items) < self.config.market_min_sample:
+            return items
+        cat_id, _name, top = self._dominant_category(items)
+        if not cat_id or top < share:
+            return items
+        if not part_watch:
+            by_category: dict[str, list[float]] = {}
+            for item in items:
+                by_category.setdefault(getattr(item, "category_id", ""), []).append(
+                    item.total_price
+                )
+            level = market_price(by_category[cat_id]) or 0.0
+            for other, prices in by_category.items():
+                rival = market_price(prices) if other and other != cat_id else None
+                if rival and len(prices) >= 3 and level < 0.5 * rival:
+                    return items
+        return [
+            item for item in items
+            if not getattr(item, "category_id", "") or item.category_id == cat_id
+        ]
+
+    async def _sample_market(self, row, *, explain: bool = False) -> _Snapshot:
+        """Search, narrow to comparable listings, and split them into per-variant
+        clusters. Pricing happens in :meth:`_quote_market`. With ``explain`` the
+        snapshot also records why each rejected listing was rejected."""
         query = row["query"]
         category_ids = row["category_id"] or None
         include_auctions = self._watch_auctions_enabled(row)
-        search_query = canonicalize(query)
+        search_query = normalize_market_query(query)
+        limit = self.config.market_sample_size
         items = await self.ebay.search_market(
             search_query,
             condition=row["condition"],
             min_price=row["min_price"],
             max_price=row["max_price"],
-            limit=self.config.market_sample_size,
+            limit=limit,
             category_ids=category_ids,
             include_auctions=include_auctions,
+        )
+        # When eBay reports more matches than it returned (or, failing that, a
+        # full page came back), the sample is a window onto a larger market, so
+        # a listing dropping out of it is not evidence that the listing ended.
+        total = getattr(items, "total", None)
+        truncated = (
+            total > len(items) if total is not None
+            else len(items) >= min(max(limit, 1), 200)
         )
         if self.config.market_deal_scan:
             # Optional supplementary cheapest-first pass to catch deep-page deals.
@@ -665,46 +900,205 @@ class EbaySpyService:
                 condition=row["condition"],
                 min_price=row["min_price"],
                 max_price=row["max_price"],
-                limit=self.config.market_sample_size,
+                limit=limit,
                 sort="price",
                 category_ids=category_ids,
                 include_auctions=include_auctions,
             )
             seen = {item.item_id for item in items}
             items.extend(item for item in extra if item.item_id not in seen)
-        blocked = self.store.blocked_item_ids(row["id"])
-        comparable = [
-            item
-            for item in filter_comparable(
-                query,
-                items,
-                extra_excludes=self._watch_exclude_terms(row),
-                coverage=self.config.market_match_coverage,
-                fuzzy_threshold=self.config.market_fuzzy_threshold,
-                semantic_threshold=self._semantic_threshold(),
-            )
-            if item.item_id not in blocked
-        ]
-        # Enrich the comparable set with eBay's structured catalog data (ePID,
-        # GTIN, MPN, aspects) so variant clustering uses authoritative values
-        # instead of guessing from titles — bounded so the extra calls stay cheap.
+        rejected: dict[str, str] | None = {} if explain else None
+        comparable = self._comparable(row, items, rejected=rejected)
+        # Enrich with eBay's structured catalog data (aspects, ePID…) so variant
+        # clustering uses authoritative values instead of guessing from titles.
+        # The client caches per listing, so each one costs a call once, not once
+        # per check, and the per-check budget rolls forward through the sample.
         if self.config.market_hydrate:
             comparable = await self.ebay.hydrate_market_items(
                 comparable, self.config.market_hydrate_limit
             )
-        # The market price is set by fixed-price listings only; an auction's live
-        # bid is artificially low mid-auction and would drag the median down.
+        # Fair value is set by fixed-price listings only; an auction's live bid
+        # is artificially low mid-auction and would drag it down.
         fixed = [item for item in comparable if not item.is_auction]
         auctions = [item for item in comparable if item.is_auction]
+        specified = specified_dimensions(query)
+        if row["condition"]:
+            specified.add("condition")
+        previous = self.store.market_dimensions(row["id"])
         dimensions = choose_cluster_dimensions(
             fixed,
-            specified_dimensions(query),
+            specified,
             min_sample=self.config.market_min_sample,
             min_dispersion=self.config.market_min_dispersion,
+            previous=previous,
         )
-        clusters = cluster_by_variant(fixed, dimensions)
-        self._store_headline_price(row["id"], items, fixed, clusters)
-        return items, comparable, clusters, dimensions, auctions
+        if dimensions != previous:
+            self.store.set_market_dimensions(row["id"], dimensions)
+        return _Snapshot(
+            items=items,
+            comparable=comparable,
+            fixed=fixed,
+            auctions=auctions,
+            dimensions=dimensions,
+            clusters=cluster_by_variant(fixed, dimensions),
+            truncated=truncated,
+            rejected=rejected or {},
+        )
+
+    def _cleared_observations(self, row, dimensions: list[str]) -> dict[str, list[pricing.Obs]]:
+        """Recently ended listings as transaction proxies, per current variant.
+
+        Each is re-validated against today's matcher and exclude list (so a
+        listing admitted under older rules, or since flagged "not the item",
+        stops counting) and re-labelled under today's dimensions; newer endings
+        weigh more.
+        """
+        window = self.config.market_cleared_window_days
+        blocked = self.store.blocked_item_ids(row["id"])
+        rows = [
+            r for r in self.store.cleared_listings(row["id"], window)
+            if r["title"] and r["item_id"] not in blocked
+        ]
+        if not rows:
+            return {}
+        valid = filter_comparable(
+            row["query"],
+            rows,
+            key=lambda r: r["title"],
+            extra_excludes=self._watch_exclude_terms(row),
+            coverage=self.config.market_match_coverage,
+            fuzzy_threshold=self.config.market_fuzzy_threshold,
+        )
+        out: dict[str, list[pricing.Obs]] = {}
+        for r in valid:
+            try:
+                values = json.loads(r["attrs"])
+            except (TypeError, ValueError):
+                continue
+            label = label_from_values(values, dimensions) if isinstance(values, dict) else None
+            if label is None:
+                continue
+            weight = pricing.recency_weight(r["age_days"] or 0.0, window / 3)
+            out.setdefault(label, []).append(pricing.Obs(r["price"], weight, r["seller"] or ""))
+        return out
+
+    async def _quote_market(self, row, snap: _Snapshot) -> None:
+        """Price every variant that has enough evidence, fusing live asks with
+        confirmed-ended listings and (when entitled) real sold prices."""
+        cleared = self._cleared_observations(row, snap.dimensions)
+        sold: dict[str, list[pricing.Obs]] = {}
+        if self.config.market_price_source == "insights" and snap.clusters:
+            sold = await self._fetch_sold(row, snap)
+        for label, group in snap.clusters.items():
+            fair = pricing.fair_value(
+                (pricing.Obs(item.total_price, seller=item.seller) for item in group),
+                cleared.get(label, ()),
+                sold.get(label, ()),
+            )
+            # The gate counts effective evidence after clipping and after
+            # discounting one seller's duplicates — not raw rows.
+            evidence = sum(part.n_eff for part in fair.components) if fair else 0.0
+            if fair is not None and evidence >= self.config.market_min_sample - 1e-9:
+                snap.quotes[label] = fair
+        self._store_headline(row["id"], snap)
+
+    async def _fetch_sold(self, row, snap: _Snapshot) -> dict[str, list[pricing.Obs]]:
+        """Real sold prices per variant from the Marketplace Insights API. Also
+        fills the snapshot's sales-velocity tag and recent comps. Returns {} on
+        any failure so the quote falls back to listings."""
+        try:
+            sold = await self.ebay.search_item_sales(
+                normalize_market_query(row["query"]),
+                condition=row["condition"],
+                category_ids=row["category_id"] or None,
+                limit=self.config.market_sample_size,
+            )
+        except Exception:
+            log.warning("Insights sold-data lookup failed for %s; using listings", row["query"])
+            return {}
+        comparable = self._comparable(row, sold, allow_lots=False)
+        # Sold prices are item-only while live totals include postage; add the
+        # live sample's typical postage so the two are like for like.
+        shipping = (
+            statistics.median(item.shipping_cost or 0.0 for item in snap.fixed)
+            if snap.fixed else 0.0
+        )
+        now = datetime.now(timezone.utc)
+        out: dict[str, list[pricing.Obs]] = {}
+        for label, group in cluster_by_variant(comparable, snap.dimensions).items():
+            if label not in snap.clusters:
+                continue
+            recent = sorted(group, key=lambda s: s.sold_date or "", reverse=True)
+            out[label] = [
+                pricing.Obs(
+                    sale.total_price + shipping,
+                    pricing.recency_weight(self._age_days(sale.sold_date, now), 30.0),
+                    sale.seller,
+                )
+                for sale in recent
+            ]
+            snap.comps[label] = [sale.total_price + shipping for sale in recent[:3]]
+        snap.sold_tag, _ = insights_metrics.summarize_sold(comparable)
+        return out
+
+    @staticmethod
+    def _age_days(value: str | None, now: datetime) -> float:
+        parsed = _parse_iso_utc(value) if value else None
+        return max(0.0, (now - parsed).total_seconds() / 86400) if parsed else 0.0
+
+    def _store_headline(self, watch_id: int, snap: _Snapshot) -> None:
+        """Persist the best-populated priced variant as the /watches headline."""
+        if not snap.quotes:
+            self.store.update_market_price(watch_id, None, len(snap.items), len(snap.fixed), None)
+            return
+        label = max(snap.quotes, key=lambda key: len(snap.clusters.get(key, ())))
+        fair = snap.quotes[label]
+        self.store.update_market_price(
+            watch_id, fair.price, len(snap.items), len(snap.fixed), label or None,
+            low=fair.low, high=fair.high, confidence=fair.confidence,
+        )
+
+    async def _record_lifecycle(self, row, snap: _Snapshot) -> None:
+        """Record sightings of the fixed-price comparables and settle the ones
+        that vanished — the raw material for demand and for cleared-price evidence.
+
+        When the sample is the whole market, an absence beyond the grace period
+        counts as an ending for the demand read. When it is only a window,
+        absence proves nothing. Either way a bounded number are confirmed with
+        getItem each check, and only confirmed endings inform the price.
+        """
+        watch_id = row["id"]
+        self.store.record_market_sightings(
+            watch_id,
+            [
+                (
+                    item.item_id,
+                    variant_key(item, snap.dimensions) or "",
+                    item.total_price,
+                    item.currency,
+                    item.listed_at,
+                    item.title,
+                    item.seller,
+                    json.dumps(variant_values(item)),
+                )
+                for item in snap.fixed
+            ],
+        )
+        seen = {item.item_id for item in snap.fixed}
+        grace = self.config.market_demand_grace_seconds
+        if not snap.truncated:
+            # Good enough for the demand read; NOT for pricing (below).
+            self.store.mark_disappeared_listings(watch_id, seen, grace)
+        # A listing also vanishes when a filter changes (a new category, a price
+        # cap) or the matcher is retuned. Only a getItem that says "ended" turns
+        # an absence into price evidence; one that says "still live" clears it.
+        for item_id in self.store.disappeared_candidates(
+            watch_id, seen, grace, self.config.market_verify_ended_limit
+        ):
+            active = await self.ebay.item_active(item_id)
+            if active is not None:
+                self.store.resolve_disappeared_listing(watch_id, item_id, ended=not active)
+        self.store.prune_market_listings(watch_id)
 
     def _watch_auctions_enabled(self, row) -> bool:
         flag = row["include_auctions"]
@@ -801,51 +1195,14 @@ class EbaySpyService:
                 channels, f"⚠️ Market watch #{row['id']} “{row['query']}” {problem}"
             )
 
-    async def _fetch_sold_prices(self, row, dimensions, labels: set[str]):
-        """Real sold-price medians, distribution, and recent comps per variant,
-        plus a sales-velocity tag, from the Marketplace Insights API. Returns
-        ({}, None, {}, {}) on any failure so the caller keeps the live estimate."""
-        try:
-            sold = await self.ebay.search_item_sales(
-                canonicalize(row["query"]),
-                condition=row["condition"],
-                category_ids=row["category_id"] or None,
-                limit=self.config.market_sample_size,
-            )
-        except Exception:
-            log.warning("Insights sold-data lookup failed for %s; using listings", row["query"])
-            return {}, None, {}, {}
-        comparable = filter_comparable(
-            row["query"],
-            sold,
-            key=lambda item: item.title,
-            extra_excludes=self._watch_exclude_terms(row),
-            coverage=self.config.market_match_coverage,
-            fuzzy_threshold=self.config.market_fuzzy_threshold,
-            semantic_threshold=self._semantic_threshold(),
-        )
-        clusters = cluster_by_variant(comparable, dimensions)
-        price_map: dict[str, float] = {}
-        dist_map: dict[str, tuple[float, float, float]] = {}
-        comps_map: dict[str, list[float]] = {}
-        for label, group in clusters.items():
-            if label not in labels or len(group) < self.config.market_min_sample:
-                continue
-            price = market_price(item.total_price for item in group)
-            if price is None:
-                continue
-            price_map[label] = price
-            dist = price_distribution(item.total_price for item in group)
-            if dist:
-                dist_map[label] = dist
-            # Most-recent sold prices as comps (newest first by sold date).
-            recent = sorted(group, key=lambda s: s.sold_date or "", reverse=True)
-            comps_map[label] = [s.total_price for s in recent[:3]]
-        tag, _ = insights_metrics.summarize_sold(comparable)
-        return price_map, tag, dist_map, comps_map
-
     def _demand_summary(self, watch_id: int) -> tuple[str, str]:
-        stats = self.store.market_demand_stats(watch_id, self.config.market_demand_window_days)
+        row = self.store.get_market_watch(watch_id)
+        cadence = self._market_interval_for(row) if row is not None else 0
+        stats = self.store.market_demand_stats(
+            watch_id,
+            self.config.market_demand_window_days,
+            max(self.config.market_demand_grace_seconds, cadence),
+        )
         return demand_metrics.summarize(
             stats,
             window_days=self.config.market_demand_window_days,
@@ -863,111 +1220,156 @@ class EbaySpyService:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return (parsed - datetime.now(timezone.utc)).total_seconds()
 
-    def _auction_candidates(
-        self, row, auctions: list[MarketItem], dimensions, priced, muted, discount
-    ) -> list[_Deal]:
-        """Auction snipes below their own variant's fixed-price market.
+    def _auction_candidates(self, row, snap: _Snapshot, discount, muted) -> list[_Deal]:
+        """Auction snipes below their own variant's fair value.
 
         Sends a heads-up the first time a bid is below market, and a separate
         final-call when it enters the snipe window; flags the watch for turbo
-        polling so the final-call lands in time. Auctions with no/low competition
-        qualify at a gentler discount, since winning uncontested is itself worth a lot.
+        polling so the final-call lands in time. An auction about to close with
+        no/low competition qualifies at a gentler discount — few bids only mean
+        "uncontested" once there is no time left for more to arrive.
         """
         watch_id = row["id"]
         ratio = self.config.market_min_deal_ratio
         snipe = self.config.market_snipe_window_seconds
         out: list[_Deal] = []
-        for auction in auctions:
-            label = variant_label(auction, dimensions) if dimensions else ""
-            price = priced.get(label)
-            if price is None or label in muted:
-                continue
-            low_comp = (
-                auction.bid_count is not None
-                and auction.bid_count <= self.config.market_low_bid_count
-            )
-            effective_discount = (
-                min(discount, self.config.market_nobid_discount_percent) if low_comp else discount
-            )
-            if not (price * ratio <= auction.total_price <= price * (1 - effective_discount / 100)):
+        for auction in snap.auctions:
+            label = variant_key(auction, snap.dimensions)
+            fair = snap.quotes.get(label) if label is not None else None
+            if fair is None or self._is_muted(label, muted) or not self._alertable(fair):
                 continue
             secs = self._seconds_until(auction.end_date)
             if secs is not None and secs <= 0:
                 continue  # already ended
             ending_soon = secs is not None and secs <= snipe
+            low_comp = (
+                ending_soon
+                and auction.bid_count is not None
+                and auction.bid_count <= self.config.market_low_bid_count
+            )
+            ceiling = deal_threshold(
+                fair.price, discount, fair.predictive_sd, self.config.market_confidence_z
+            )
+            if low_comp:
+                relaxed = min(discount, self.config.market_nobid_discount_percent)
+                ceiling = max(ceiling, deal_threshold(fair.price, relaxed))
+            if not (fair.price * ratio <= auction.total_price <= ceiling):
+                continue
+            # Set before the dedupe check: once the heads-up has gone out the
+            # watch must KEEP polling tightly, or the final call is never seen.
+            if secs is not None and secs <= snipe * 2:
+                self._auction_turbo[watch_id] = self.config.market_turbo_interval_seconds
             stage = "final" if ending_soon else "deal"
             if self.store.deal_already_alerted(watch_id, auction.item_id, stage):
                 continue
             out.append(
-                _Deal(auction, price, label or None, stage, ending_soon, low_comp)
+                _Deal(auction, fair.price, label or None, stage, ending_soon, low_comp, quote=fair)
             )
-            if secs is not None and secs <= snipe * 2:
-                self._auction_turbo[watch_id] = self.config.market_turbo_interval_seconds
         return out
 
     def _watch_lots_enabled(self, row) -> bool:
         return bool(row["include_lots"])
 
-    def _lot_candidates(self, row, items, dimensions, priced, muted, discount) -> list[_Deal]:
-        """Job-lot/bundle deals: value a lot of N by N × the single-unit market.
+    def _lot_candidates(self, row, snap: _Snapshot, discount, muted) -> list[_Deal]:
+        """Job-lot/bundle deals: value a lot of N by N × the single-unit fair value.
 
-        Lots are normally excluded from matching; here we deliberately keep them,
-        parse the quantity, and flag lots priced below their per-unit worth.
+        A lot is a listing the normal matcher rejected but the lot-tolerant one
+        accepts. Anything that already prices as a single unit is excluded, so
+        "console with 2 controllers" is never valued as two consoles.
         """
         if not self._watch_lots_enabled(row):
             return []
         watch_id = row["id"]
         ratio = self.config.market_min_deal_ratio
-        blocked = self.store.blocked_item_ids(watch_id)
-        lot_comparable = [
-            item
-            for item in filter_comparable(
-                row["query"],
-                items,
-                extra_excludes=self._watch_exclude_terms(row),
-                coverage=self.config.market_match_coverage,
-                fuzzy_threshold=self.config.market_fuzzy_threshold,
-                semantic_threshold=self._semantic_threshold(),
-                allow_lots=True,
-            )
-            if item.item_id not in blocked and not item.is_auction
-        ]
+        singles = {item.item_id for item in snap.comparable}
         out: list[_Deal] = []
-        for lot in lot_comparable:
+        for lot in self._comparable(row, snap.items, allow_lots=True):
+            if lot.is_auction or lot.item_id in singles:
+                continue
             quantity = lot_quantity(lot.title)
             if not quantity:
                 continue
-            label = variant_label(lot, dimensions) if dimensions else ""
-            unit_market = priced.get(label)
-            if unit_market is None or label in muted:
+            label = variant_key(lot, snap.dimensions)
+            fair = snap.quotes.get(label) if label is not None else None
+            if fair is None or self._is_muted(label, muted) or not self._alertable(fair):
                 continue
-            lot_value = unit_market * quantity
-            if not (lot_value * ratio <= lot.total_price <= lot_value * (1 - discount / 100)):
+            lot_value = fair.price * quantity
+            ceiling = deal_threshold(
+                lot_value, discount, fair.predictive_sd, self.config.market_confidence_z
+            )
+            if not (lot_value * ratio <= lot.total_price <= ceiling):
                 continue
             if self.store.deal_already_alerted(watch_id, lot.item_id, "lot"):
                 continue
-            out.append(_Deal(lot, lot_value, label or None, "lot", lot_quantity=quantity))
+            out.append(
+                _Deal(lot, lot_value, label or None, "lot", lot_quantity=quantity, quote=fair)
+            )
         return out
 
-    def _store_headline_price(self, watch_id, items, comparable, clusters) -> float | None:
-        """Persist the largest well-populated variant as the headline price."""
-        priceable = {
-            label: group
-            for label, group in clusters.items()
-            if len(group) >= self.config.market_min_sample
-        }
-        chosen = priceable or clusters
-        price, variant = None, None
-        if chosen:
-            label, group = max(chosen.items(), key=lambda kv: len(kv[1]))
-            price = market_price(item.total_price for item in group)
-            variant = label or None
-        self.store.update_market_price(watch_id, price, len(items), len(comparable), variant)
-        return price
+    def _alertable(self, fair: pricing.FairValue) -> bool:
+        """Whether a quote is trustworthy enough to alert against. Below the
+        floor the "market" is too thin or too mixed to say what anything in it
+        is worth: it is still quoted (with its low confidence), never traded on."""
+        return fair.confidence >= self.config.market_min_confidence
 
-    async def _check_market_watch(self, row, channels: list[str]) -> int:
+    @staticmethod
+    def _is_muted(label: str, muted: set[str]) -> bool:
+        """Whether a variant is muted. A mute names the attributes the user
+        muted ("128gb"); it keeps applying when the market later splits on a
+        further dimension and the label grows ("128gb · used")."""
+        if label in muted:
+            return True
+        parts = set(label.split(" · ")) if label else set()
+        return any(mute and set(mute.split(" · ")) <= parts for mute in muted)
+
+    @staticmethod
+    def _deal_score(deal: _Deal) -> float:
+        """Edge in predictive standard deviations — comparable across variants,
+        so a modest gap in a tight market can outrank a wide one in a noisy one."""
+        paid = deal.offer_estimate if deal.offer_estimate is not None else deal.item.total_price
+        spread = deal.quote.predictive_sd if deal.quote else pricing.MIN_SIGMA
+        return pricing.edge_z(paid, deal.price, spread)
+
+    def _deal_candidates(self, row, snap: _Snapshot, discount, muted) -> list[_Deal]:
+        """Every un-alerted deal this check, strongest edge first, one per listing."""
         watch_id = row["id"]
-        query = row["query"]
+        ratio = self.config.market_min_deal_ratio
+        z = self.config.market_confidence_z
+        found: list[_Deal] = []
+        for label, fair in snap.quotes.items():
+            if self._is_muted(label, muted) or not self._alertable(fair):
+                continue
+            group = snap.clusters.get(label, [])
+            for item in find_deals(
+                group, fair.price, discount, ratio,
+                predictive_sd=fair.predictive_sd, confidence_z=z,
+            ):
+                if not self.store.deal_already_alerted(watch_id, item.item_id, "deal"):
+                    found.append(_Deal(item, fair.price, label or None, "deal", quote=fair))
+            if not self.config.market_offer_aware:
+                continue
+            # Best-Offer candidates: the list price isn't a deal, but a plausible
+            # accepted offer off that list price would be.
+            ceiling = deal_threshold(fair.price, discount, fair.predictive_sd, z)
+            for item, estimate in offer_candidates(
+                group, fair.price, discount, self.config.market_expected_offer_discount,
+                ratio, threshold=ceiling,
+            ):
+                if not self.store.deal_already_alerted(watch_id, item.item_id, "offer"):
+                    found.append(
+                        _Deal(item, fair.price, label or None, "offer",
+                              offer_estimate=estimate, quote=fair)
+                    )
+        found.extend(self._auction_candidates(row, snap, discount, muted))
+        found.extend(self._lot_candidates(row, snap, discount, muted))
+        best: dict[str, _Deal] = {}
+        for deal in found:
+            current = best.get(deal.item.item_id)
+            if current is None or self._deal_score(deal) > self._deal_score(current):
+                best[deal.item.item_id] = deal
+        return sorted(best.values(), key=self._deal_score, reverse=True)
+
+    def _watch_discount(self, row) -> float:
         discount = (
             row["discount_percent"]
             if row["discount_percent"] is not None
@@ -975,154 +1377,77 @@ class EbaySpyService:
         )
         if self.config.market_feedback_enabled:
             # 👍/👎 feedback nudges the required discount; flows through every deal
-            # type since this single value is passed into find_deals/auctions/lots.
-            discount = max(1, min(95, discount + self.store.get_discount_nudge(watch_id)))
+            # type since this single value drives fixed, auction and lot deals.
+            discount = max(1, min(95, discount + self.store.get_discount_nudge(row["id"])))
+        return discount
+
+    async def _check_market_watch(self, row, channels: list[str]) -> int:
+        # Turbo polling is re-armed by each check that still sees an auction
+        # near its end. Cleared up front so a check that errors, or can no
+        # longer price the market, cannot leave the watch polling every 45s.
+        self._auction_turbo.pop(row["id"], None)
         try:
-            items, comparable, clusters, dimensions, auctions = await self._sample_market(row)
+            snap = await self._sample_market(row)
+            await self._quote_market(row, snap)
+            # Lifecycle is recorded even when nothing can be priced yet: the
+            # endings it captures are what eventually make a thin market priceable.
+            await self._record_lifecycle(row, snap)
         except Exception as exc:
-            log.exception("Failed pricing market watch %s (%s)", watch_id, query)
-            await self._finish_market_check(row, channels, deal_count=0, error=str(exc))
-            return 0
-
-        # Price each variant against its own kind. A cluster must clear the
-        # minimum-sample gate before its median is trusted; otherwise a too-narrow
-        # or too-dispersed query would mis-price the market and fire false deals.
-        priced = {
-            label: market_price(item.total_price for item in group)
-            for label, group in clusters.items()
-            if len(group) >= self.config.market_min_sample
-        }
-        # Price distribution (P10/P50/P90) per variant — from live asking prices
-        # by default, overridden by real sold prices under the insights source.
-        dist_by_label = {
-            label: price_distribution(item.total_price for item in clusters.get(label, []))
-            for label in priced
-        }
-        comps_by_label: dict[str, list[float]] = {}
-
-        # When real sold data is available, price each (live-buyable) variant
-        # against its *sold* median instead of the live-asking median.
-        sold_demand_tag = None
-        if self.config.market_price_source == "insights" and priced:
-            sold_map, sold_demand_tag, sold_dist, sold_comps = await self._fetch_sold_prices(
-                row, dimensions, set(priced)
+            log.exception("Failed pricing market watch %s (%s)", row["id"], row["query"])
+            await self._finish_market_check(
+                row, channels, deal_count=0, error=str(exc) or exc.__class__.__name__
             )
-            for label, sold in sold_map.items():
-                priced[label] = sold
-            dist_by_label.update(sold_dist)
-            comps_by_label = sold_comps
-            if sold_map:
-                # Keep the /watches headline consistent with the sold pricing.
-                dominant = max(priced, key=lambda label: len(clusters.get(label, [])))
-                self.store.update_market_price(
-                    watch_id, priced[dominant], len(items), len(comparable), dominant or None
-                )
-        if not priced:
+            return 0
+        return await self._alert_deals(row, channels, snap)
+
+    async def _alert_deals(self, row, channels: list[str], snap: _Snapshot) -> int:
+        """Screen, rank and send the deals in a priced snapshot. Returns how many
+        were sent. (Also the entry point a dry run drives, with a recording
+        Discord, so what it reports is exactly what would have been alerted.)"""
+        watch_id = row["id"]
+        query = row["query"]
+        discount = self._watch_discount(row)
+        quotes = snap.quotes
+        if not quotes:
             await self._finish_market_check(row, channels, deal_count=0, empty=True)
             log.info(
                 "Market watch %s (%s): %s/%s comparable across %s variant(s), "
-                "none with the %s needed to price — holding",
-                watch_id,
-                query,
-                len(comparable),
-                len(items),
-                len(clusters),
+                "none with the evidence needed to price (min %s) — holding",
+                watch_id, query, len(snap.fixed), len(snap.items), len(snap.clusters),
                 self.config.market_min_sample,
             )
             return 0
 
-        for label, price in priced.items():
-            if price is not None:
-                self.store.record_price_sample(watch_id, label, price)
-
-        # Collect lifecycle data for the demand read: record sightings of the
-        # fixed-price comparables and mark ones that have vanished as ended.
-        fixed = [item for item in comparable if not item.is_auction]
-        self.store.record_market_sightings(
-            watch_id,
-            [
-                (
-                    item.item_id,
-                    variant_label(item, dimensions) if dimensions else "",
-                    item.total_price,
-                    item.currency,
-                    item.listed_at,
-                )
-                for item in fixed
-            ],
-        )
-        self.store.mark_disappeared_listings(
-            watch_id,
-            {item.item_id for item in fixed},
-            self.config.market_demand_grace_seconds,
-        )
+        for label, fair in quotes.items():
+            self.store.record_price_sample(watch_id, label, fair.price)
         demand_tag, _ = self._demand_summary(watch_id)
-        if sold_demand_tag:
-            demand_tag = sold_demand_tag
+        if snap.sold_tag:
+            demand_tag = snap.sold_tag
 
         # The reference 'stock' image each listing photo is compared against,
         # established once per watch (pinned or auto-derived) and reused free.
-        reference_url = await self._ensure_reference_image(row, comparable)
-
-        muted = self.store.muted_variants(watch_id)
-        ratio = self.config.market_min_deal_ratio
-        candidates: list[_Deal] = []
-
-        # Fixed-price deals across every priceable variant.
-        for label, group in clusters.items():
-            price = priced.get(label)
-            if price is None or label in muted:
-                continue
-            for item in find_deals(group, price, discount, ratio):
-                if not self.store.deal_already_alerted(watch_id, item.item_id, "deal"):
-                    candidates.append(_Deal(item, price, label or None, "deal"))
-
-        # Auction snipes, priced against their own variant's fixed-price market.
-        self._auction_turbo.pop(watch_id, None)
-        candidates.extend(self._auction_candidates(row, auctions, dimensions, priced, muted, discount))
-        # Lot/bundle arbitrage (opt-in per watch).
-        candidates.extend(self._lot_candidates(row, items, dimensions, priced, muted, discount))
-
-        # Best-Offer candidates: list price isn't a deal but a plausible accepted
-        # offer would be. Skip items already a list-price deal this cycle.
-        if self.config.market_offer_aware:
-            deal_ids = {c.item.item_id for c in candidates}
-            for label, group in clusters.items():
-                price = priced.get(label)
-                if price is None or label in muted:
-                    continue
-                for item, estimate in offer_candidates(
-                    group,
-                    price,
-                    discount,
-                    self.config.market_expected_offer_discount,
-                    ratio,
-                    sold_comps=comps_by_label.get(label or ""),
-                ):
-                    if item.item_id in deal_ids:
-                        continue
-                    if not self.store.deal_already_alerted(watch_id, item.item_id, "offer"):
-                        candidates.append(
-                            _Deal(item, price, label or None, "offer", offer_estimate=estimate)
-                        )
-
-        candidates.sort(key=lambda c: c.item.total_price / c.price)
+        reference_url = await self._ensure_reference_image(row, snap.comparable)
+        candidates = self._deal_candidates(
+            row, snap, discount, self.store.muted_variants(watch_id)
+        )
         first_check = not self.store.market_watch_has_successful_check(watch_id)
         sent_count = 0
         # Drain at most a handful of deals per tick so a backlog (common on the
         # very first check) never floods the channel in one burst.
         home_country = self._home_country()
-        for deal in candidates[: self.config.market_max_deals_per_cycle]:
-            item, price, variant = deal.item, deal.price, deal.variant
-            stage, ending_soon, low_comp = deal.stage, deal.ending_soon, deal.low_competition
+        # The per-cycle cap counts alerts actually SENT. Listings that risk or
+        # vision screens out must not occupy a slot, or a handful of scam
+        # listings at the top of the ranking would block every real deal behind
+        # them on every check, forever.
+        for deal in candidates:
+            if sent_count >= self.config.market_max_deals_per_cycle:
+                break
+            item, price, variant, fair = deal.item, deal.price, deal.variant, deal.quote
             lot_qty = deal.lot_quantity
-            offer_estimate = deal.offer_estimate
             risk_score, risk_reasons = risk_metrics.assess(item, price, home_country)
             # ``>=`` so the documented suppression actually fires: the score is
-            # capped at 100 and the default max is 100, so a strict ``>`` could
-            # never suppress even an all-red-flags listing. Conservative by design
-            # (only the worst tier) so legitimate niche/foreign deals still come
-            # through; lower MARKET_RISK_MAX to suppress more aggressively.
+            # capped at 100 and the default max is 100. Conservative by design
+            # (only the worst tier); lower MARKET_RISK_MAX to suppress more.
             if risk_score >= self.config.market_risk_max:
                 log.info(
                     "Suppressing high-risk deal %s on watch %s (risk %s: %s)",
@@ -1140,37 +1465,48 @@ class EbaySpyService:
                     "Vision dropped deal %s on watch %s: image doesn't match the product",
                     item.item_id, watch_id,
                 )
+                # Remember the verdict so the photo is not re-examined every check.
+                self.store.record_deal_alert(
+                    watch_id, item.item_id, item.total_price, variant=variant,
+                    title=item.title, stage="suppressed",
+                )
                 continue
             # Offer candidates are judged on the estimated accepted-offer price,
             # not the list price.
-            effective_price = offer_estimate if offer_estimate is not None else item.total_price
-            actual_discount = discount_percent_for(effective_price, price)
+            paid = deal.offer_estimate if deal.offer_estimate is not None else item.total_price
+            units = lot_qty or 1
+            fee_fixed = self.config.market_resale_fee_fixed * units
+            postage = self.config.market_resale_shipping * units
             profit, roi = estimate_resale_profit(
-                price,
-                effective_price,
-                self.config.market_resale_fee_percent,
-                self.config.market_resale_fee_fixed * (lot_qty or 1),
+                price, paid, self.config.market_resale_fee_percent, fee_fixed, postage
             )
+            quick_profit = None
+            if fair is not None:
+                quick_exit = pricing.quick_sale_price(price, fair.sigma)
+                quick_profit, _ = estimate_resale_profit(
+                    quick_exit, paid, self.config.market_resale_fee_percent, fee_fixed, postage
+                )
             sent = await self._notify_deal_channels(
                 channels,
                 item,
                 market_price=price,
-                discount_percent=actual_discount,
+                discount_percent=discount_percent_for(paid, price),
                 query=query,
-                variant=variant if dimensions else None,
+                variant=variant if snap.dimensions else None,
                 profit=profit,
                 roi=roi,
                 watch_id=watch_id,
-                ending_soon=ending_soon,
+                ending_soon=deal.ending_soon,
                 trend=self._price_trend_text(watch_id, variant),
                 demand=demand_tag,
-                distribution=dist_by_label.get(variant or ""),
-                comps=comps_by_label.get(variant or ""),
-                low_competition=low_comp,
+                comps=snap.comps.get(variant or ""),
+                low_competition=deal.low_competition,
                 risk=risk_text,
                 lot_quantity=lot_qty,
                 vision=vision_note,
-                offer_estimate=offer_estimate,
+                offer_estimate=deal.offer_estimate,
+                quote=fair,
+                quick_profit=quick_profit,
             )
             if sent:
                 # Only mark the deal as alerted once it has actually been
@@ -1178,7 +1514,7 @@ class EbaySpyService:
                 # failure would permanently suppress a real below-market deal.
                 self.store.record_deal_alert(
                     watch_id, item.item_id, item.total_price, variant=variant,
-                    title=item.title, stage=stage,
+                    title=item.title, stage=deal.stage,
                 )
                 sent_count += 1
         await self._finish_market_check(row, channels, deal_count=sent_count)
@@ -1187,62 +1523,20 @@ class EbaySpyService:
             "%s deals alerted%s",
             watch_id,
             query,
-            len(comparable),
-            len(items),
-            len(priced),
-            f" by {'+'.join(dimensions)}" if dimensions else "",
+            len(snap.fixed),
+            len(snap.items),
+            len(quotes),
+            f" by {'+'.join(snap.dimensions)}" if snap.dimensions else "",
             sent_count,
             " (first check)" if first_check else "",
         )
         return sent_count
 
-    async def _notify_deal_channels(
-        self,
-        channels: list[str],
-        item: MarketItem,
-        *,
-        market_price: float,
-        discount_percent: float,
-        query: str,
-        variant: str | None = None,
-        profit: float | None = None,
-        roi: float | None = None,
-        watch_id: int | None = None,
-        ending_soon: bool = False,
-        trend: str = "",
-        demand: str = "",
-        distribution: tuple[float, float, float] | None = None,
-        comps: list[float] | None = None,
-        low_competition: bool = False,
-        risk: str = "",
-        lot_quantity: int | None = None,
-        vision: str = "",
-        offer_estimate: float | None = None,
-    ) -> bool:
+    async def _notify_deal_channels(self, channels: list[str], item: MarketItem, **details) -> bool:
         sent_any = False
         for channel_id in channels:
             try:
-                await self.discord.notify_deal(
-                    channel_id,
-                    item,
-                    market_price=market_price,
-                    discount_percent=discount_percent,
-                    query=query,
-                    variant=variant,
-                    profit=profit,
-                    roi=roi,
-                    watch_id=watch_id,
-                    ending_soon=ending_soon,
-                    trend=trend,
-                    demand=demand,
-                    distribution=distribution,
-                    comps=comps,
-                    low_competition=low_competition,
-                    risk=risk,
-                    lot_quantity=lot_quantity,
-                    vision=vision,
-                    offer_estimate=offer_estimate,
-                )
+                await self.discord.notify_deal(channel_id, item, **details)
                 sent_any = True
             except Exception:
                 log.exception("Failed sending Discord deal alert to channel %s", channel_id)
@@ -1252,7 +1546,7 @@ class EbaySpyService:
         self, watched_seller: str, listings: list[Listing], channels: list[str]
     ) -> str | None:
         observed = self._observed_changed_seller(watched_seller, listings)
-        if not observed and not listings:
+        if not observed and not listings and self._rename_probe_due(watched_seller):
             observed = await self._probe_current_seller_from_known_items(watched_seller)
         if not observed:
             return None
@@ -1271,6 +1565,21 @@ class EbaySpyService:
                 self.store.set_meta(notice_key, "sent")
             log.info("Detected possible seller username change: %s -> %s", watched_seller, observed)
         return observed
+
+    def _rename_probe_due(self, seller: str) -> bool:
+        """Whether to spend getItem calls checking an empty seller for a rename.
+
+        A seller with nothing listed looks the same on every poll, so probing
+        each time burns hundreds of calls a day for no new information; once a
+        day is enough to catch a rename.
+        """
+        key = f"seller_rename_probe_at:{seller.lower()}"
+        last = _parse_iso_utc(self.store.get_meta(key) or "")
+        now = datetime.now(timezone.utc)
+        if last is not None and (now - last).total_seconds() < 86400:
+            return False
+        self.store.set_meta(key, now.isoformat())
+        return True
 
     def _observed_changed_seller(self, watched_seller: str, listings: list[Listing]) -> str | None:
         watched = watched_seller.lower()
@@ -1393,7 +1702,9 @@ class EbaySpyService:
                 "/watch lego 75192 markets:GB,DE,US — cross-border arbitrage\n"
                 "/watch airpods pro lots:on exclude:case — job lots, drops \"case\"\n"
                 "\n"
-                "Manage: /watches · /unwatch <id> · /demand <id> · /refimage <id> <url>\n"
+                "Manage: /watches · /unwatch <id> · /quote <id> · /demand <id> · /refimage <id> <url>\n"
+                "/quote <id> shows the working: fair value, confidence, the evidence "
+                "behind it, and the price alerts fire at.\n"
                 "Tip: in /watches, /list and /observing, click 🗑 next to a row to "
                 "remove it — no need to type the id or name.\n"
                 "📷 Deals are matched against the item's stock photo to drop wrong items; "
@@ -1532,6 +1843,8 @@ class EbaySpyService:
                 return "No market watch with that id."
             _, detail = self._demand_summary(int(token))
             return f"Demand for “{watch['query']}”:\n{detail}"
+        if command == "/quote":
+            return await self._handle_quote(arg)
         if command == "/refimage":
             return self._handle_refimage(arg)
         if command == "/watches":
@@ -1830,54 +2143,131 @@ class EbaySpyService:
         if row is None:
             return ""
         try:
-            items, comparable, clusters, dimensions, _auctions = await self._sample_market(row)
+            snap = await self._sample_market(row)
+            await self._quote_market(row, snap)
         except Exception:
             log.warning("Could not sample market watch %s on add", watch_id, exc_info=True)
             return "I'll price it on the next check."
-        priced = {
-            label: market_price(item.total_price for item in group)
-            for label, group in clusters.items()
-            if len(group) >= self.config.market_min_sample
-        }
-        if not priced:
+        quotes = snap.quotes
+        if not quotes:
             return (
-                f"Found only {len(comparable)} comparable of {len(items)} listings — "
+                f"Found only {len(snap.fixed)} comparable of {len(snap.items)} listings — "
                 "too few to price reliably. Try broader terms, drop the model number, "
                 "or relax filters."
             )
-        row = self.store.get_market_watch(watch_id)
-        headline = f"Market ≈ {row['market_price']:.2f}"
-        if row["market_variant"]:
-            headline += f" for {row['market_variant']}"
-        if dimensions and len(priced) > 1:
+        label = max(quotes, key=lambda key: len(snap.clusters.get(key, ())))
+        fair = quotes[label]
+        headline = f"Market ≈ {fair.price:.2f}"
+        if label:
+            headline += f" for {label}"
+        headline += f" (likely {fair.low:.0f}–{fair.high:.0f}, {fair.confidence}% confidence)"
+        if snap.dimensions and len(quotes) > 1:
             others = ", ".join(
-                f"{label or 'base'} ≈ {value:.0f}"
-                for label, value in sorted(priced.items())
-                if value
+                f"{name or 'base'} ≈ {value.price:.0f}" for name, value in sorted(quotes.items())
             )
             headline += (
-                f". Pricing variants separately by {'+'.join(dimensions)} — {others}. "
-                f"From {len(comparable)} comparable of {len(items)} sampled."
+                f". Pricing variants separately by {'+'.join(snap.dimensions)} — {others}. "
+                f"From {len(snap.fixed)} comparable of {len(snap.items)} sampled."
             )
         else:
             headline += (
-                f" from {len(comparable)} comparable of {len(items)} listings sampled."
+                f" from {len(snap.fixed)} comparable of {len(snap.items)} listings sampled."
             )
         suggestion = ""
+        if fair.sigma >= 0.30:
+            # A spread this wide is rarely one product: say so rather than let a
+            # precise-looking number stand in for a mixed market.
+            suggestion += (
+                f" Prices here vary a lot (±{fair.sigma * 100:.0f}%), which usually means "
+                "several different products — name the model, generation or condition "
+                "for a tighter price."
+            )
         if not row["category_id"]:
-            cat_id, cat_name, share = self._dominant_category(comparable)
+            cat_id, cat_name, share = self._dominant_category(snap.comparable)
             if cat_id and share >= 0.6:
-                suggestion = f" Tip: most are in “{cat_name}” — add category:{cat_id} to cut noise."
-        return headline + " I'll alert as deals appear." + suggestion
+                suggestion += f" Tip: most are in “{cat_name}” — add category:{cat_id} to cut noise."
+        return headline + " I'll alert as deals appear. /quote " + f"{watch_id} shows the working." + suggestion
+
+    async def _handle_quote(self, arg: str) -> str:
+        """The full pricing breakdown for a watch: per variant, the fair value
+        with its interval, the evidence behind it, and the prices that matter
+        to someone trading it."""
+        token = arg.split()[0] if arg.split() else ""
+        if not token.isdigit():
+            return "Usage: /quote <id>  (see ids with /watches)"
+        row = self.store.get_market_watch(int(token))
+        if row is None:
+            return "No market watch with that id."
+        try:
+            snap = await self._sample_market(row)
+            await self._quote_market(row, snap)
+        except Exception as exc:
+            log.warning("Could not quote market watch %s", row["id"], exc_info=True)
+            return f"Couldn't price it just now ({str(exc) or exc.__class__.__name__})."
+        currency = MARKETPLACE_CURRENCY.get(self._home_marketplace(), "USD")
+        discount = self._watch_discount(row)
+
+        def money(value: float) -> str:
+            return format_money(value, currency)
+
+        names = {"asks": "asks", "cleared": "ended", "sold": "sold"}
+        lines = [
+            f"Quote for “{row['query']}” (#{row['id']}) — "
+            f"{len(snap.fixed)} comparable of {len(snap.items)} sampled"
+            + (f", priced by {'+'.join(snap.dimensions)}" if snap.dimensions else "")
+        ]
+        for label in sorted(snap.quotes, key=lambda key: -len(snap.clusters.get(key, ()))):
+            fair = snap.quotes[label]
+            evidence = " · ".join(
+                f"{names.get(part.source, part.source)} {money(part.price)} ×{part.n}"
+                for part in fair.components
+            )
+            ceiling = deal_threshold(
+                fair.price, discount, fair.predictive_sd, self.config.market_confidence_z
+            )
+            breakeven = pricing.net_proceeds(
+                fair.price, self.config.market_resale_fee_percent,
+                self.config.market_resale_fee_fixed, self.config.market_resale_shipping,
+            )
+            lines.append(
+                f"\n• {label or 'all listings'}: fair {money(fair.price)} "
+                f"({money(fair.low)}–{money(fair.high)}, {fair.confidence}% confidence)"
+            )
+            lines.append(f"   evidence: {evidence}")
+            lines.append(
+                f"   alerts at or below {money(ceiling)} · quick-sale "
+                f"{money(pricing.quick_sale_price(fair.price, fair.sigma))} · "
+                f"break-even buy {money(breakeven)}"
+            )
+        thin = [
+            f"{label or 'all listings'} ({len(group)})"
+            for label, group in snap.clusters.items()
+            if label not in snap.quotes
+        ]
+        if thin:
+            lines.append(
+                f"\nToo little evidence to price yet (need {self.config.market_min_sample}): "
+                + ", ".join(sorted(thin))
+            )
+        unresolved = len(snap.fixed) - sum(len(group) for group in snap.clusters.values())
+        if unresolved > 0:
+            lines.append(
+                f"{unresolved} listing(s) don't state their {'/'.join(snap.dimensions)} "
+                "and are left unpriced rather than guessed."
+            )
+        if not snap.quotes and not thin:
+            lines.append("\nNo comparable listings found.")
+        return "\n".join(lines)
 
     @staticmethod
     def _dominant_category(items: list[MarketItem]) -> tuple[str, str, float]:
         counts: dict[str, tuple[str, int]] = {}
         for item in items:
-            if not item.category_id:
+            category_id = getattr(item, "category_id", "")
+            if not category_id:
                 continue
-            name, count = counts.get(item.category_id, (item.category_name, 0))
-            counts[item.category_id] = (name, count + 1)
+            name, count = counts.get(category_id, (getattr(item, "category_name", ""), 0))
+            counts[category_id] = (name, count + 1)
         if not counts:
             return "", "", 0.0
         cat_id, (name, count) = max(counts.items(), key=lambda kv: kv[1][1])
@@ -1916,6 +2306,10 @@ class EbaySpyService:
                 f"the market. Pin the exact stock image with /refimage {watch_id} <url>."
             )
         value = parts[1]
+        if value.lower() in {"clear", "auto", "off", "none"} or value.lower().startswith(
+            ("http://", "https://")
+        ):
+            self.store.clear_suppressed_deals(watch_id)
         if value.lower() in {"clear", "auto", "off", "none"}:
             self.store.set_market_reference_image(watch_id, None)
             return f"Cleared the reference image for “{query}” — back to auto."

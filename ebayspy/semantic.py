@@ -6,21 +6,28 @@ match, across any category rather than only the ones with hand-written rules.
 
 Everything here is best-effort: if the library or model is unavailable, every
 function returns None and the rule + fuzzy layers carry matching on their own.
-The service therefore never hard-depends on the model being installed.
+The service therefore never hard-depends on the model being installed. A
+missing library switches semantics off for the life of the process; any other
+load failure (a network blip while fetching the model, say) is retried after
+``RETRY_SECONDS`` instead of latching off until restart.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 log = logging.getLogger(__name__)
 
 # Small, retrieval-tuned static model: ~30MB, loads once, embeds via lookup+pool.
 MODEL_NAME = "minishlab/potion-retrieval-32M"
+# Cool-down before a failed (non-import) model load is attempted again.
+RETRY_SECONDS = 30 * 60
 
 _model = None
-_loaded = False
 _disabled = False
+_unavailable = False          # the library itself is missing: never retry
+_failed_at: float | None = None
 
 
 def disable() -> None:
@@ -30,24 +37,33 @@ def disable() -> None:
 
 
 def _get_model():
-    global _model, _loaded
-    if _disabled:
+    global _model, _unavailable, _failed_at
+    if _disabled or _unavailable:
         return None
-    if _loaded:
+    if _model is not None:
         return _model
-    _loaded = True
+    if _failed_at is not None and time.monotonic() - _failed_at < RETRY_SECONDS:
+        return None
     try:
         from model2vec import StaticModel
-
-        _model = StaticModel.from_pretrained(MODEL_NAME)
-        log.info("Semantic matching enabled (model2vec %s)", MODEL_NAME)
-    except Exception:
+    except ImportError:
+        _unavailable = True
         log.info(
             "Semantic matching unavailable (install the 'nlp' extra); "
-            "falling back to rules + fuzzy matching.",
+            "falling back to rules + fuzzy matching."
+        )
+        return None
+    try:
+        _model = StaticModel.from_pretrained(MODEL_NAME)
+        _failed_at = None
+        log.info("Semantic matching enabled (model2vec %s)", MODEL_NAME)
+    except Exception:
+        _failed_at = time.monotonic()
+        log.warning(
+            "Semantic model failed to load; retrying in %d minutes.",
+            RETRY_SECONDS // 60,
             exc_info=True,
         )
-        _model = None
     return _model
 
 
@@ -57,8 +73,10 @@ def available() -> bool:
 
 def similarities(query: str, titles: list[str]) -> list[float] | None:
     """Cosine similarity of ``query`` against each title, or None if unavailable."""
+    if not titles:
+        return None
     model = _get_model()
-    if model is None or not titles:
+    if model is None:
         return None
     try:
         import numpy as np

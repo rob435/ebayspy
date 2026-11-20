@@ -128,7 +128,11 @@ class Store:
                 consecutive_empty integer not null default 0,
                 health_alerted integer not null default 0,
                 discount_nudge real not null default 0,
-                reference_image_url text
+                reference_image_url text,
+                market_low real,
+                market_high real,
+                market_confidence integer,
+                market_dimensions text
             );
 
             create table if not exists market_deal_alerts (
@@ -175,6 +179,10 @@ class Store:
                 checks_seen integer not null default 1,
                 price_drops integer not null default 0,
                 ended_at text,
+                title text,
+                seller text,
+                attrs text,
+                ended_confirmed integer,
                 primary key (watch_id, item_id)
             );
             create index if not exists idx_market_listings
@@ -260,10 +268,20 @@ class Store:
             "health_alerted": "integer not null default 0",
             "discount_nudge": "real not null default 0",
             "reference_image_url": "text",
+            "market_low": "real",
+            "market_high": "real",
+            "market_confidence": "integer",
+            "market_dimensions": "text",
         }
         for column, definition in market_defaults.items():
             if column not in market_columns:
                 self.conn.execute(f"alter table market_watches add column {column} {definition}")
+        listing_columns = self._table_columns("market_listings")
+        for column in ("title", "seller", "attrs"):
+            if column not in listing_columns:
+                self.conn.execute(f"alter table market_listings add column {column} text")
+        if "ended_confirmed" not in listing_columns:
+            self.conn.execute("alter table market_listings add column ended_confirmed integer")
         alert_columns = self._table_columns("market_deal_alerts")
         alert_defaults = {
             "variant": "text",
@@ -670,14 +688,36 @@ class Store:
         sample_size: int,
         comparable_size: int,
         variant: str | None = None,
+        *,
+        low: float | None = None,
+        high: float | None = None,
+        confidence: int | None = None,
     ) -> None:
+        """Persist the headline fair value (with its interval and confidence when
+        known) so /watches can show it without re-pricing."""
         self.conn.execute(
             """
             update market_watches
-            set market_price = ?, market_variant = ?, sample_size = ?, comparable_size = ?
+            set market_price = ?, market_variant = ?, sample_size = ?, comparable_size = ?,
+                market_low = ?, market_high = ?, market_confidence = ?
             where id = ?
             """,
-            (price, variant, sample_size, comparable_size, watch_id),
+            (price, variant, sample_size, comparable_size, low, high, confidence, watch_id),
+        )
+        self.conn.commit()
+
+    def market_dimensions(self, watch_id: int) -> list[str]:
+        """Variant dimensions the watch was last priced on (sticky across checks)."""
+        row = self.conn.execute(
+            "select market_dimensions from market_watches where id = ?", (watch_id,)
+        ).fetchone()
+        raw = row["market_dimensions"] if row is not None else None
+        return [part for part in (raw or "").split(",") if part]
+
+    def set_market_dimensions(self, watch_id: int, dimensions: list[str]) -> None:
+        self.conn.execute(
+            "update market_watches set market_dimensions = ? where id = ?",
+            (",".join(dimensions), watch_id),
         )
         self.conn.commit()
 
@@ -753,7 +793,10 @@ class Store:
     # "offer" ranks below "deal" so recording an offer-candidate alert never
     # suppresses a later genuine list-price "deal", but a recorded "deal" does
     # suppress a repeat "offer".
-    _STAGE_RANK = {"offer": -1, "deal": 0, "lot": 0, "final": 1}
+    # "suppressed" (the photo was judged not to be the product) outranks every
+    # stage: the listing is never re-examined, so it cannot hold an alert slot
+    # hostage or cost a vision pass on every check.
+    _STAGE_RANK = {"offer": -1, "deal": 0, "lot": 0, "final": 1, "suppressed": 2}
 
     def deal_already_alerted(self, watch_id: int, item_id: str, stage: str = "deal") -> bool:
         row = self.conn.execute(
@@ -869,38 +912,73 @@ class Store:
     def price_trend(
         self, watch_id: int, variant: str | None, window_days: int = 7
     ) -> float | None:
-        """Percent change of the latest price vs the most recent sample at least
-        ``window_days`` old. None until that much history exists."""
-        params = (watch_id, variant or "")
-        latest = self.conn.execute(
-            "select price from market_price_history "
-            "where watch_id = ? and variant = ? order by sampled_at desc limit 1",
-            params,
-        ).fetchone()
-        baseline = self.conn.execute(
-            "select price from market_price_history "
-            "where watch_id = ? and variant = ? and sampled_at <= datetime('now', ?) "
-            "order by sampled_at desc limit 1",
-            (watch_id, variant or "", f"-{int(window_days)} days"),
-        ).fetchone()
-        if latest is None or baseline is None or not baseline["price"]:
+        """Percent change of the market over ``window_days``, or None until that
+        much history exists.
+
+        Compares the median of the last day's samples with the median of the
+        day that ended ``window_days`` ago. A watch is priced many times a day,
+        so two single samples would mostly measure the noise between them.
+        If that earlier day has no samples (the service was off), the most
+        recent sample before it stands in.
+        """
+        key = (watch_id, variant or "")
+        window = int(window_days)
+
+        def median(since: str, until: str | None) -> float | None:
+            sql = (
+                "select price from market_price_history "
+                "where watch_id = ? and variant = ? and sampled_at > datetime('now', ?)"
+            )
+            params: tuple = (*key, since)
+            if until is not None:
+                sql += " and sampled_at <= datetime('now', ?)"
+                params += (until,)
+            prices = sorted(row["price"] for row in self.conn.execute(sql, params))
+            if not prices:
+                return None
+            mid = len(prices) // 2
+            return prices[mid] if len(prices) % 2 else (prices[mid - 1] + prices[mid]) / 2
+
+        latest = median("-1 days", None)
+        baseline = median(f"-{window + 1} days", f"-{window} days")
+        if baseline is None:
+            row = self.conn.execute(
+                "select price from market_price_history "
+                "where watch_id = ? and variant = ? and sampled_at <= datetime('now', ?) "
+                "order by sampled_at desc limit 1",
+                (*key, f"-{window} days"),
+            ).fetchone()
+            baseline = row["price"] if row is not None else None
+        if latest is None or not baseline:
             return None
-        return (latest["price"] - baseline["price"]) / baseline["price"] * 100
+        return (latest - baseline) / baseline * 100
 
     def record_market_sightings(
-        self, watch_id: int, sightings: list[tuple[str, str, float | None, str, str | None]]
+        self, watch_id: int, sightings: list[tuple]
     ) -> None:
         """Upsert each currently-seen listing's lifecycle row.
 
-        ``sightings`` is (item_id, variant, price, currency, listed_at). A price
-        below the previously recorded one counts as a price drop (a soft
+        ``sightings`` is (item_id, variant, price, currency, listed_at) optionally
+        followed by (title, seller, attrs). ``attrs`` is the JSON of every variant
+        dimension's value at sighting time, so a listing that later ends can be
+        re-labelled under whatever dimensions the watch is priced on by then. A
+        price below the previously recorded one counts as a price drop (a
         soft-demand signal), and a reappearing listing is reactivated.
         """
+        rows = []
+        for sighting in sightings:
+            item_id, variant, price, currency, listed_at, title, seller, attrs = (
+                *sighting, None, None, None
+            )[:8]
+            rows.append(
+                (watch_id, item_id, variant or "", price, currency or "", listed_at,
+                 title, seller, attrs)
+            )
         self.conn.executemany(
             """
             insert into market_listings(
-                watch_id, item_id, variant, price, currency, listed_at
-            ) values (?, ?, ?, ?, ?, ?)
+                watch_id, item_id, variant, price, currency, listed_at, title, seller, attrs
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(watch_id, item_id) do update set
                 last_seen_at = current_timestamp,
                 checks_seen = market_listings.checks_seen + 1,
@@ -912,14 +990,94 @@ class Store:
                 ),
                 price = excluded.price,
                 variant = excluded.variant,
-                ended_at = null
+                title = coalesce(excluded.title, market_listings.title),
+                seller = coalesce(excluded.seller, market_listings.seller),
+                attrs = coalesce(excluded.attrs, market_listings.attrs),
+                ended_at = null,
+                ended_confirmed = null
             """,
-            [
-                (watch_id, item_id, variant or "", price, currency or "", listed_at)
-                for item_id, variant, price, currency, listed_at in sightings
-            ],
+            rows,
         )
         self.conn.commit()
+
+    def disappeared_candidates(
+        self, watch_id: int, seen_item_ids: set[str], grace_seconds: int, limit: int
+    ) -> list[str]:
+        """Listings absent beyond the grace period whose fate has not been
+        confirmed either way, most recently seen first (the freshest endings are
+        the most useful price evidence) — the ones worth a getItem."""
+        if limit <= 0:
+            return []
+        placeholders = ",".join("?" for _ in seen_item_ids) or "''"
+        rows = self.conn.execute(
+            f"""
+            select item_id from market_listings
+            where watch_id = ?
+              and ended_confirmed is null
+              and last_seen_at < datetime('now', ?)
+              and item_id not in ({placeholders})
+            order by last_seen_at desc
+            limit ?
+            """,
+            (watch_id, f"-{int(grace_seconds)} seconds", *seen_item_ids, int(limit)),
+        ).fetchall()
+        return [row["item_id"] for row in rows]
+
+    def resolve_disappeared_listing(self, watch_id: int, item_id: str, ended: bool) -> None:
+        """Record a getItem verdict on a listing that left the sample.
+
+        Ended: stamp it at its last sighting and mark it confirmed — only such
+        rows count as price evidence. Still live: it merely fell out of view (a
+        window onto a bigger market, or a changed filter), so it is neither
+        ended nor active, and is not asked about again unless it reappears.
+        """
+        if ended:
+            self.conn.execute(
+                "update market_listings "
+                "set ended_at = coalesce(ended_at, last_seen_at), ended_confirmed = 1 "
+                "where watch_id = ? and item_id = ?",
+                (watch_id, item_id),
+            )
+        else:
+            self.conn.execute(
+                "update market_listings set ended_at = null, ended_confirmed = 0 "
+                "where watch_id = ? and item_id = ?",
+                (watch_id, item_id),
+            )
+        self.conn.commit()
+
+    def clear_suppressed_deals(self, watch_id: int) -> None:
+        """Forget photo-based rejections (the reference image they were judged
+        against has changed, so the verdicts no longer stand)."""
+        self.conn.execute(
+            "delete from market_deal_alerts where watch_id = ? and stage = 'suppressed'",
+            (watch_id,),
+        )
+        self.conn.commit()
+
+    def cleared_listings(self, watch_id: int, window_days: int) -> list[sqlite3.Row]:
+        """Listings CONFIRMED ended within the window, with their last asking
+        price — the transaction proxies behind the fair value. Absence from a
+        sample is not enough (a changed filter makes live listings vanish too).
+        Only rows that carry ``attrs`` qualify, so they can be re-labelled (and
+        re-validated against the current matcher) rather than trusted on a
+        label from another era."""
+        if window_days <= 0:
+            return []
+        return self.conn.execute(
+            """
+            select item_id, price, title, seller, attrs,
+                   julianday('now') - julianday(ended_at) as age_days
+            from market_listings
+            where watch_id = ?
+              and ended_at is not null
+              and ended_at >= datetime('now', ?)
+              and ended_confirmed = 1
+              and price is not null and price > 0
+              and attrs is not null
+            """,
+            (watch_id, f"-{int(window_days)} days"),
+        ).fetchall()
 
     def mark_disappeared_listings(
         self, watch_id: int, seen_item_ids: set[str], grace_seconds: int
@@ -935,30 +1093,45 @@ class Store:
             update market_listings set ended_at = last_seen_at
             where watch_id = ?
               and ended_at is null
+              and ended_confirmed is null
               and last_seen_at < datetime('now', ?)
               and item_id not in ({placeholders})
             """,
             (watch_id, f"-{int(grace_seconds)} seconds", *seen_item_ids),
         )
+        self.conn.commit()
+        self.prune_market_listings(watch_id)
+        return cur.rowcount
+
+    def prune_market_listings(self, watch_id: int) -> None:
+        """Drop lifecycle rows too old to inform demand or pricing — both the
+        long-ended and the long-unseen (which were never confirmed either way)."""
         self.conn.execute(
-            "delete from market_listings "
-            "where watch_id = ? and ended_at is not null "
-            "and ended_at < datetime('now', '-60 days')",
+            "delete from market_listings where watch_id = ? and ("
+            "(ended_at is not null and ended_at < datetime('now', '-60 days')) or "
+            "(ended_at is null and last_seen_at < datetime('now', '-60 days')))",
             (watch_id,),
         )
         self.conn.commit()
-        return cur.rowcount
 
-    def market_demand_stats(self, watch_id: int, window_days: int) -> dict:
+    def market_demand_stats(
+        self, watch_id: int, window_days: int, grace_seconds: int = 86400
+    ) -> dict:
         window = f"-{int(window_days)} days"
+        # "Active" means seen recently: a listing that slid out of a truncated
+        # sample and is still awaiting confirmation is not known to be on sale.
+        fresh = f"-{int(grace_seconds) * 2} seconds"
 
         def scalar(sql: str, *params) -> float:
             row = self.conn.execute(sql, params).fetchone()
             return (row[0] if row and row[0] is not None else 0) or 0
 
         active_count = int(
-            scalar("select count(*) from market_listings where watch_id=? and ended_at is null",
-                   watch_id)
+            scalar(
+                "select count(*) from market_listings where watch_id=? and ended_at is null "
+                "and last_seen_at >= datetime('now', ?)",
+                watch_id, fresh,
+            )
         )
         ended_in_window = int(
             scalar(
@@ -1146,7 +1319,19 @@ class Store:
         )
         self.conn.commit()
 
-    def upsert_active_listings(self, listings: list[Listing]) -> None:
+    def upsert_active_listings(
+        self,
+        listings: list[Listing],
+        *,
+        keep_price: frozenset[str] | set[str] = frozenset(),
+        keep_quantity: frozenset[str] | set[str] = frozenset(),
+    ) -> None:
+        """Refresh the stored snapshot of a seller's active listings.
+
+        ``keep_price`` / ``keep_quantity`` name items whose price-drop or restock
+        alert could not be delivered: their previous value is left in place so
+        the next poll still sees the change and retries the alert.
+        """
         self.conn.executemany(
             """
             insert into active_items(
@@ -1171,14 +1356,15 @@ class Store:
             on conflict(item_id) do update set
                 seller = excluded.seller,
                 title = excluded.title,
-                price = excluded.price,
+                price = case when ? then active_items.price else excluded.price end,
                 url = excluded.url,
                 description = excluded.description,
                 listed_at = excluded.listed_at,
                 image_url = excluded.image_url,
                 listing_type = excluded.listing_type,
                 category = excluded.category,
-                quantity_available = excluded.quantity_available,
+                quantity_available = case when ? then active_items.quantity_available
+                                          else excluded.quantity_available end,
                 seller_feedback_percent = excluded.seller_feedback_percent,
                 seller_feedback_score = excluded.seller_feedback_score,
                 last_seen_at = current_timestamp,
@@ -1200,6 +1386,8 @@ class Store:
                     item.quantity_available,
                     item.seller_feedback_percent,
                     item.seller_feedback_score,
+                    item.item_id in keep_price,
+                    item.item_id in keep_quantity,
                 )
                 for item in listings
             ],
@@ -1501,6 +1689,8 @@ def format_market_rows(
                 f"market ≈ {row['market_price']:.2f}{variant} "
                 f"({comparable} comparable/{row['sample_size']})"
             )
+            if row["market_confidence"] is not None:
+                details.append(f"{row['market_confidence']}% conf")
         else:
             details.append("market pending")
         if row["category_id"]:

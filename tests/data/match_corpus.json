@@ -1,0 +1,3634 @@
+[
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Midnight Unlocked",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": "plain listing"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 Pro Max 256GB Sierra Blue Unlocked",
+  "match": true,
+  "category": "phones",
+  "kind": "variant",
+  "note": "unpinned qualifier+capacity"
+ },
+ {
+  "query": "iphone 13",
+  "title": "iPhone 13 mini 128GB Pink - Unlocked - Very Good Condition",
+  "match": true,
+  "category": "phones",
+  "kind": "variant",
+  "note": "unpinned mini"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple I Phone 13 256gb Starlight EE",
+  "match": true,
+  "category": "phones",
+  "kind": "reworded",
+  "note": "spaced 'i phone' alias"
+ },
+ {
+  "query": "iphone 13",
+  "title": "APPLE IPHONE13 128GB BLUE UNLOCKED SIM FREE",
+  "match": true,
+  "category": "phones",
+  "kind": "reworded",
+  "note": "glued model+number"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 (PRODUCT)RED 128GB Smartphone",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": "product red colour"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 Pro 128GB Graphite Unlocked",
+  "match": true,
+  "category": "phones",
+  "kind": "variant",
+  "note": "unpinned pro"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 - 512GB - Green (Unlocked) A2633",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": "with model code"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 14 128GB Midnight Unlocked",
+  "match": false,
+  "category": "phones",
+  "kind": "sibling_model",
+  "note": "next generation"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Blue iCloud Locked Spares",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "icloud locked"
+ },
+ {
+  "query": "iphone 13",
+  "title": "iPhone 13 128GB Activation Locked For Parts",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "for parts"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 Cracked Back Glass Fully Working 128GB",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "cracked"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Pink Screen Burn Read Description",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "screen burn"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Green UNLOCKED Face ID Not Working",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "face id broken"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Silicone Case for iPhone 13 with MagSafe Midnight",
+  "match": false,
+  "category": "phones",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Tempered Glass Screen Protector iPhone 13 / 13 Pro 2 Pack",
+  "match": false,
+  "category": "phones",
+  "kind": "accessory",
+  "note": "protector multipack"
+ },
+ {
+  "query": "iphone 13",
+  "title": "MagSafe Charger for iPhone 13 12 14 15 Wireless 15W",
+  "match": false,
+  "category": "phones",
+  "kind": "accessory",
+  "note": "compat list charger"
+ },
+ {
+  "query": "iphone 13",
+  "title": "iPhone 13 Replacement OLED Screen Display Digitizer",
+  "match": false,
+  "category": "phones",
+  "kind": "part",
+  "note": "screen part"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 Logic Board 128GB Unlocked Working",
+  "match": false,
+  "category": "phones",
+  "kind": "part",
+  "note": "logic board, no exclusion word"
+ },
+ {
+  "query": "iphone 13",
+  "title": "iPhone 13 Original Box Only No Phone",
+  "match": false,
+  "category": "phones",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 Dummy Display Phone Non Working Model",
+  "match": false,
+  "category": "phones",
+  "kind": "replica",
+  "note": "dummy"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Job Lot 3x Apple iPhone 13 128GB Unlocked Grade B",
+  "match": false,
+  "category": "phones",
+  "kind": "lot",
+  "note": "job lot 3x"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Unlocked Bundle with AirPods 2nd Gen",
+  "match": "ambiguous",
+  "category": "phones",
+  "kind": "bundle",
+  "note": "meaningful extra"
+ },
+ {
+  "query": "iphone 13",
+  "title": "Apple iPhone 13 128GB Unlocked Refurbished Excellent",
+  "match": "ambiguous",
+  "category": "phones",
+  "kind": "exact",
+  "note": "refurbished wording"
+ },
+ {
+  "query": "iphone 13",
+  "title": "iPhone 13 128GB Unlocked Midnight with Case and Screen Protector",
+  "match": true,
+  "category": "phones",
+  "kind": "bundle",
+  "note": "minor extras"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Graphite Unlocked",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256 GB Sierra Blue EE Network Good Condition",
+  "match": true,
+  "category": "phones",
+  "kind": "reworded",
+  "note": "spaced capacity"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro - 256GB - Silver (Unlocked) A2638",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Gold Unlocked Battery 79% Read",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": "battery health is condition"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB 5G Smartphone Unlocked Blue",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Graphite Boxed with Charger",
+  "match": true,
+  "category": "phones",
+  "kind": "bundle",
+  "note": "minor in-box charger"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Graphite + Leather Case Bundle",
+  "match": true,
+  "category": "phones",
+  "kind": "bundle",
+  "note": "minor freebie case"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "APPLE IPHONE 13 PRO 256GB ALPINE GREEN SIM FREE VGC",
+  "match": true,
+  "category": "phones",
+  "kind": "exact",
+  "note": "caps"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro Max 256GB Gold Unlocked",
+  "match": false,
+  "category": "phones",
+  "kind": "variant_mismatch",
+  "note": "max not pinned"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 128GB Graphite Unlocked",
+  "match": false,
+  "category": "phones",
+  "kind": "variant_mismatch",
+  "note": "128 vs 256"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 512GB Alpine Green",
+  "match": false,
+  "category": "phones",
+  "kind": "variant_mismatch",
+  "note": "512 vs 256"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 256GB Midnight Unlocked",
+  "match": false,
+  "category": "phones",
+  "kind": "variant_mismatch",
+  "note": "no pro"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 14 Pro 256GB Deep Purple",
+  "match": false,
+  "category": "phones",
+  "kind": "sibling_model",
+  "note": "14"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256GB Unlocked Smashed Screen Working",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "smashed"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256GB Water Damaged Spares",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "water damaged"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Sim Free - Face ID Faulty",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Apple iPhone 13 Pro 256GB Unlocked iCloud Locked",
+  "match": false,
+  "category": "phones",
+  "kind": "damaged",
+  "note": "icloud locked"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "Leather Wallet Folio for iPhone 13 Pro Brown",
+  "match": false,
+  "category": "phones",
+  "kind": "accessory",
+  "note": "wallet folio"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "2 x Apple iPhone 13 Pro 256GB Unlocked Job",
+  "match": false,
+  "category": "phones",
+  "kind": "lot",
+  "note": "2 x"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256GB Housing Chassis Graphite",
+  "match": false,
+  "category": "phones",
+  "kind": "part",
+  "note": "housing"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256GB Replica Clone Android",
+  "match": false,
+  "category": "phones",
+  "kind": "replica",
+  "note": "clone"
+ },
+ {
+  "query": "iphone 13 pro 256gb",
+  "title": "iPhone 13 Pro 256GB Grade A Refurbished Unlocked",
+  "match": "ambiguous",
+  "category": "phones",
+  "kind": "exact",
+  "note": "refurbished wording"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Wireless Noise Cancelling Headphones Black",
+  "match": true,
+  "category": "headphones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH1000XM5 Silver Over Ear Bluetooth Headphones",
+  "match": true,
+  "category": "headphones",
+  "kind": "reworded",
+  "note": "no hyphen"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "SONY WH 1000XM5 Headphones Midnight Blue",
+  "match": true,
+  "category": "headphones",
+  "kind": "reworded",
+  "note": "space for hyphen"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5/B Noise Cancelling Headphones",
+  "match": true,
+  "category": "headphones",
+  "kind": "exact",
+  "note": "colour suffix /B"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony 1000XM5 headphones silver used",
+  "match": true,
+  "category": "headphones",
+  "kind": "reworded",
+  "note": "WH prefix dropped"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony XM5 Over-Ear Headphones Smoky Pink",
+  "match": true,
+  "category": "headphones",
+  "kind": "reworded",
+  "note": "colloquial XM5"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Black - Used Once - With Case and Cable",
+  "match": true,
+  "category": "headphones",
+  "kind": "bundle",
+  "note": "own case/cable standard"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Platinum Silver Boxed VGC",
+  "match": true,
+  "category": "headphones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM4 Wireless Headphones Black",
+  "match": false,
+  "category": "headphones",
+  "kind": "sibling_model",
+  "note": "XM4"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WF-1000XM5 Wireless Earbuds Black",
+  "match": false,
+  "category": "headphones",
+  "kind": "sibling_model",
+  "note": "WF earbuds"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-CH720N Noise Cancelling Headphones",
+  "match": false,
+  "category": "headphones",
+  "kind": "sibling_model",
+  "note": "different model"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Replacement Ear Pads Cushions",
+  "match": false,
+  "category": "headphones",
+  "kind": "part",
+  "note": "ear pads"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Carry Case for Sony WH-1000XM5 Hard Travel",
+  "match": false,
+  "category": "headphones",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Charging Cable USB-C Genuine",
+  "match": false,
+  "category": "headphones",
+  "kind": "accessory",
+  "note": "cable"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Left Earcup Not Working",
+  "match": false,
+  "category": "headphones",
+  "kind": "damaged",
+  "note": "not working"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Faulty Right Side No Sound",
+  "match": false,
+  "category": "headphones",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Snapped Headband Taped",
+  "match": false,
+  "category": "headphones",
+  "kind": "damaged",
+  "note": "snapped, no keyword"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Box Only",
+  "match": false,
+  "category": "headphones",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Copy AAA Replica",
+  "match": false,
+  "category": "headphones",
+  "kind": "replica",
+  "note": "replica"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Black Open Box",
+  "match": "ambiguous",
+  "category": "headphones",
+  "kind": "exact",
+  "note": "open box"
+ },
+ {
+  "query": "sony wh-1000xm5",
+  "title": "Sony WH-1000XM5 Headphones Silver Bundle with Sony Speaker",
+  "match": "ambiguous",
+  "category": "headphones",
+  "kind": "bundle",
+  "note": "meaningful extra"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2nd Generation with MagSafe Case USB-C",
+  "match": true,
+  "category": "earbuds",
+  "kind": "exact",
+  "note": "case is part of product"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro (2nd Gen) White",
+  "match": true,
+  "category": "earbuds",
+  "kind": "reworded",
+  "note": "ordinal"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple Air Pods Pro 2 Wireless Earbuds",
+  "match": true,
+  "category": "earbuds",
+  "kind": "reworded",
+  "note": "spaced alias"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2nd Gen 2023 USB-C",
+  "match": true,
+  "category": "earbuds",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2 MagSafe Lightning Sealed",
+  "match": true,
+  "category": "earbuds",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro (2nd generation) - Sealed - A2931",
+  "match": true,
+  "category": "earbuds",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro Second Generation Apple Noise Cancelling",
+  "match": true,
+  "category": "earbuds",
+  "kind": "reworded",
+  "note": "spelled ordinal"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2 Left Earbud Only A2699",
+  "match": false,
+  "category": "earbuds",
+  "kind": "part",
+  "note": "single bud"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2 Right AirPod Replacement Genuine",
+  "match": false,
+  "category": "earbuds",
+  "kind": "part",
+  "note": "single bud"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2nd Gen Charging Case Only",
+  "match": false,
+  "category": "earbuds",
+  "kind": "part",
+  "note": "case only"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2 Pair Earbuds Only No Case",
+  "match": false,
+  "category": "earbuds",
+  "kind": "part",
+  "note": "no case"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 1st Generation",
+  "match": false,
+  "category": "earbuds",
+  "kind": "sibling_model",
+  "note": "gen 1"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods 2nd Generation",
+  "match": false,
+  "category": "earbuds",
+  "kind": "sibling_model",
+  "note": "non-pro"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Max Space Grey",
+  "match": false,
+  "category": "earbuds",
+  "kind": "sibling_model",
+  "note": "max"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 3 2025",
+  "match": false,
+  "category": "earbuds",
+  "kind": "sibling_model",
+  "note": "gen 3"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2 Replacement Ear Tips Medium",
+  "match": false,
+  "category": "earbuds",
+  "kind": "accessory",
+  "note": "ear tips"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Silicone Cover for AirPods Pro 2 Case Pink",
+  "match": false,
+  "category": "earbuds",
+  "kind": "accessory",
+  "note": "cover"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2 Replica 1:1 Copy",
+  "match": false,
+  "category": "earbuds",
+  "kind": "replica",
+  "note": "replica"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Apple AirPods Pro 2 - Faulty Right Bud Crackling",
+  "match": false,
+  "category": "earbuds",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2 Box and Manual Only",
+  "match": false,
+  "category": "earbuds",
+  "kind": "packaging",
+  "note": "box+manual"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "Pack of 2 Apple AirPods Pro 2nd Gen Sealed",
+  "match": false,
+  "category": "earbuds",
+  "kind": "lot",
+  "note": "pack of 2"
+ },
+ {
+  "query": "airpods pro 2",
+  "title": "AirPods Pro 2 USB-C with Charging Case A3047 A3048",
+  "match": true,
+  "category": "earbuds",
+  "kind": "exact",
+  "note": "case is part of product"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft Xbox Series X 1TB Console Black",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Console Boxed with Controller",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": "standard controller"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft XBOX SERIES X 1TB Black Used Good",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Console Black - 1TB - Model 1882",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": "model number"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Digital Edition 1TB Robot White",
+  "match": true,
+  "category": "games consoles",
+  "kind": "variant",
+  "note": "unpinned digital"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft Xbox Series X Halo Infinite Limited Edition Console",
+  "match": true,
+  "category": "games consoles",
+  "kind": "variant",
+  "note": "special edition"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox SeriesX console 1TB",
+  "match": true,
+  "category": "games consoles",
+  "kind": "reworded",
+  "note": "glued SeriesX"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Console Only No Controller",
+  "match": false,
+  "category": "games consoles",
+  "kind": "part",
+  "note": "incomplete: no controller"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft Xbox Series S 512GB Console White",
+  "match": false,
+  "category": "games consoles",
+  "kind": "sibling_model",
+  "note": "series S"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft Xbox One X 1TB Console",
+  "match": false,
+  "category": "games consoles",
+  "kind": "sibling_model",
+  "note": "one X"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Controller Carbon Black Wireless",
+  "match": false,
+  "category": "games consoles",
+  "kind": "accessory",
+  "note": "controller"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Vertical Stand Cooling Fan",
+  "match": false,
+  "category": "games consoles",
+  "kind": "accessory",
+  "note": "stand"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Hard Drive Expansion Card 1TB Seagate",
+  "match": false,
+  "category": "games consoles",
+  "kind": "accessory",
+  "note": "expansion card"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Starfield Xbox Series X Game",
+  "match": false,
+  "category": "games consoles",
+  "kind": "media",
+  "note": "game"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Microsoft Xbox Series X 1TB HDMI Port Faulty",
+  "match": false,
+  "category": "games consoles",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Console No Power Spares Repair",
+  "match": false,
+  "category": "games consoles",
+  "kind": "damaged",
+  "note": "no power"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X Empty Box",
+  "match": false,
+  "category": "games consoles",
+  "kind": "packaging",
+  "note": "empty box"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Job Lot 4 Xbox Series X Consoles Faulty",
+  "match": false,
+  "category": "games consoles",
+  "kind": "lot",
+  "note": "job lot"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X 1TB + 2 Controllers + 3 Games",
+  "match": "ambiguous",
+  "category": "games consoles",
+  "kind": "bundle",
+  "note": "meaningful extras"
+ },
+ {
+  "query": "xbox series x",
+  "title": "Xbox Series X 1TB Console + Original Controller and Cables",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": "in-box cables"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Model White Console",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Neon Red/Blue 64GB Boxed",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Pokemon Scarlet & Violet Edition Console",
+  "match": true,
+  "category": "games consoles",
+  "kind": "variant",
+  "note": "special edition"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Switch OLED Nintendo console white boxed used",
+  "match": true,
+  "category": "games consoles",
+  "kind": "reworded",
+  "note": "word order"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Console Mint Condition Boxed",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED HEG-001 Handheld Console White Joy-Con",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": "model code"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch Lite Coral",
+  "match": false,
+  "category": "games consoles",
+  "kind": "sibling_model",
+  "note": "lite"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch V2 Console Neon",
+  "match": false,
+  "category": "games consoles",
+  "kind": "sibling_model",
+  "note": "v2 not oled"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch 2 Console",
+  "match": false,
+  "category": "games consoles",
+  "kind": "sibling_model",
+  "note": "switch 2"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Carry Case Zelda",
+  "match": false,
+  "category": "games consoles",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Joy-Con Pair Pastel Pink",
+  "match": false,
+  "category": "games consoles",
+  "kind": "accessory",
+  "note": "joy-cons"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Dock Only White",
+  "match": false,
+  "category": "games consoles",
+  "kind": "part",
+  "note": "dock only"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Console Only Tablet No Joy-Cons",
+  "match": false,
+  "category": "games consoles",
+  "kind": "part",
+  "note": "incomplete"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Replacement Shell Housing",
+  "match": false,
+  "category": "games consoles",
+  "kind": "part",
+  "note": "shell"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Model HEG-001 Console Faulty Drift",
+  "match": false,
+  "category": "games consoles",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Pokemon Scarlet Switch Game - plays on Nintendo Switch OLED",
+  "match": false,
+  "category": "games consoles",
+  "kind": "media",
+  "note": "game"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED 64GB Console - Display Model",
+  "match": false,
+  "category": "games consoles",
+  "kind": "replica",
+  "note": "display model per contract"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED Console Box Only",
+  "match": false,
+  "category": "games consoles",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Mario Kart 8 Deluxe Nintendo Switch OLED Bundle",
+  "match": "ambiguous",
+  "category": "games consoles",
+  "kind": "bundle",
+  "note": "console + game"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch OLED White with Carry Case and Screen Protector",
+  "match": true,
+  "category": "games consoles",
+  "kind": "bundle",
+  "note": "minor extras"
+ },
+ {
+  "query": "nintendo switch oled",
+  "title": "Nintendo Switch - OLED Model w/ Neon Red & Neon Blue Joy-Con",
+  "match": true,
+  "category": "games consoles",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III ILCE-7M3 Mirrorless Camera Body",
+  "match": true,
+  "category": "cameras",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony ILCE-7M3 Alpha 7 III Full Frame Body",
+  "match": true,
+  "category": "cameras",
+  "kind": "reworded",
+  "note": "Alpha 7 / ILCE-7M3 form"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7III Body Low Shutter Count",
+  "match": true,
+  "category": "cameras",
+  "kind": "reworded",
+  "note": "glued A7III"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Camera Body Shutter Count 12k Boxed",
+  "match": true,
+  "category": "cameras",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Mirrorless Camera Body Black 2 Batteries Charger",
+  "match": true,
+  "category": "cameras",
+  "kind": "bundle",
+  "note": "minor extras"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony a7 Mark III Full Frame Mirrorless Camera",
+  "match": true,
+  "category": "cameras",
+  "kind": "reworded",
+  "note": "Mark III wording"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony Alpha A7 III Mirrorless Camera Body Only 24MP",
+  "match": "ambiguous",
+  "category": "cameras",
+  "kind": "exact",
+  "note": "body only per contract"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 II Mirrorless Camera Body",
+  "match": false,
+  "category": "cameras",
+  "kind": "sibling_model",
+  "note": "A7 II"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 IV Body",
+  "match": false,
+  "category": "cameras",
+  "kind": "sibling_model",
+  "note": "A7 IV"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7R III Body 42MP",
+  "match": false,
+  "category": "cameras",
+  "kind": "sibling_model",
+  "note": "A7R III"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "NP-FZ100 Battery for Sony A7 III A7R III A9",
+  "match": false,
+  "category": "cameras",
+  "kind": "accessory",
+  "note": "battery compat list"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Camera Cage SmallRig",
+  "match": false,
+  "category": "cameras",
+  "kind": "accessory",
+  "note": "cage"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Body Cap and Rear Lens Cap",
+  "match": false,
+  "category": "cameras",
+  "kind": "accessory",
+  "note": "caps"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Shutter Unit Replacement Part",
+  "match": false,
+  "category": "cameras",
+  "kind": "part",
+  "note": "shutter unit"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Body Faulty Shutter Error",
+  "match": false,
+  "category": "cameras",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III For Parts Not Working",
+  "match": false,
+  "category": "cameras",
+  "kind": "damaged",
+  "note": "for parts"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony Alpha A7 III Dummy Camera Display",
+  "match": false,
+  "category": "cameras",
+  "kind": "replica",
+  "note": "dummy"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III with FE 28-70mm Kit Lens",
+  "match": "ambiguous",
+  "category": "cameras",
+  "kind": "bundle",
+  "note": "kit lens"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7 III Body + Sigma 24-70 f2.8 Art",
+  "match": "ambiguous",
+  "category": "cameras",
+  "kind": "bundle",
+  "note": "expensive lens"
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony a7 III Full Frame Mirrorless 24.2MP Camera Black",
+  "match": true,
+  "category": "cameras",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "sony a7 iii",
+  "title": "Sony A7iii Mirrorless Body 2 Batteries",
+  "match": true,
+  "category": "cameras",
+  "kind": "reworded",
+  "note": "glued + spare batteries"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM Lens",
+  "match": true,
+  "category": "lenses",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm F1.8 STM Prime Lens Boxed",
+  "match": true,
+  "category": "lenses",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon 50mm 1.8 STM nifty fifty",
+  "match": true,
+  "category": "lenses",
+  "kind": "reworded",
+  "note": "no f / no EF"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm 1:1.8 STM Lens",
+  "match": true,
+  "category": "lenses",
+  "kind": "reworded",
+  "note": "1:1.8 notation"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50 mm F 1.8 STM Lens Black",
+  "match": true,
+  "category": "lenses",
+  "kind": "reworded",
+  "note": "spaced f 1.8"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM Lens Mint Boxed Caps",
+  "match": true,
+  "category": "lenses",
+  "kind": "exact",
+  "note": "caps included"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM Lens White Limited Edition",
+  "match": true,
+  "category": "lenses",
+  "kind": "variant",
+  "note": "colour edition"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 II Lens",
+  "match": false,
+  "category": "lenses",
+  "kind": "sibling_model",
+  "note": "older II"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.4 USM",
+  "match": false,
+  "category": "lenses",
+  "kind": "sibling_model",
+  "note": "f1.4"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon RF 50mm f/1.8 STM",
+  "match": false,
+  "category": "lenses",
+  "kind": "sibling_model",
+  "note": "RF mount"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f1.8 STM Lens Hood ES-68",
+  "match": false,
+  "category": "lenses",
+  "kind": "accessory",
+  "note": "hood"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Lens Hood ES-68 for Canon EF 50mm f/1.8 STM",
+  "match": false,
+  "category": "lenses",
+  "kind": "accessory",
+  "note": "for <product>"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "UV Filter 49mm for Canon EF 50mm f/1.8 STM",
+  "match": false,
+  "category": "lenses",
+  "kind": "accessory",
+  "note": "filter"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM Fungus Haze Spares",
+  "match": false,
+  "category": "lenses",
+  "kind": "damaged",
+  "note": "fungus"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM AF not working MF ok",
+  "match": false,
+  "category": "lenses",
+  "kind": "damaged",
+  "note": "af broken"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f1.8 STM Lens x2",
+  "match": false,
+  "category": "lenses",
+  "kind": "lot",
+  "note": "x2"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EOS 250D with EF 50mm f/1.8 STM Lens",
+  "match": false,
+  "category": "lenses",
+  "kind": "bundle",
+  "note": "camera priced kit"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM + EF to RF Adapter",
+  "match": "ambiguous",
+  "category": "lenses",
+  "kind": "bundle",
+  "note": "adapter extra"
+ },
+ {
+  "query": "canon ef 50mm f1.8 stm",
+  "title": "Canon EF 50mm f/1.8 STM Nifty Fifty with Hood",
+  "match": true,
+  "category": "lenses",
+  "kind": "bundle",
+  "note": "minor hood"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Cordless Vacuum Cleaner Nickel/Blue",
+  "match": true,
+  "category": "vacuums",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson SV14 V11 Absolute Cordless",
+  "match": true,
+  "category": "vacuums",
+  "kind": "reworded",
+  "note": "with SV code"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V 11 Absolute Cordless Vacuum Cleaner",
+  "match": true,
+  "category": "vacuums",
+  "kind": "reworded",
+  "note": "spaced V 11"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Vacuum + Extra Tools Kit",
+  "match": true,
+  "category": "vacuums",
+  "kind": "bundle",
+  "note": "minor tools"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Vacuum Cleaner Brand New Sealed",
+  "match": true,
+  "category": "vacuums",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson Absolute V11 Stick Vacuum Purple",
+  "match": true,
+  "category": "vacuums",
+  "kind": "reworded",
+  "note": "word order"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Animal Torque Drive",
+  "match": "ambiguous",
+  "category": "vacuums",
+  "kind": "variant",
+  "note": "naming mash-up"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Extra Cordless Vacuum",
+  "match": "ambiguous",
+  "category": "vacuums",
+  "kind": "variant",
+  "note": "absolute extra sku"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Animal Cordless Vacuum",
+  "match": false,
+  "category": "vacuums",
+  "kind": "sibling_model",
+  "note": "animal"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V10 Absolute Cordless Vacuum",
+  "match": false,
+  "category": "vacuums",
+  "kind": "sibling_model",
+  "note": "V10"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Outsize Absolute",
+  "match": false,
+  "category": "vacuums",
+  "kind": "sibling_model",
+  "note": "outsize"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Replacement Battery for Dyson V11 Absolute",
+  "match": false,
+  "category": "vacuums",
+  "kind": "accessory",
+  "note": "battery"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Battery Pack for Dyson V11 Absolute Click-in 4000mAh",
+  "match": false,
+  "category": "vacuums",
+  "kind": "part",
+  "note": "battery, no keyword"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Main Body Only No Tools",
+  "match": false,
+  "category": "vacuums",
+  "kind": "part",
+  "note": "body only"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Cleaner Head Torque Drive Motorbar",
+  "match": false,
+  "category": "vacuums",
+  "kind": "part",
+  "note": "cleaner head"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Wall Mount Docking Station for Dyson V11 V10 V8",
+  "match": false,
+  "category": "vacuums",
+  "kind": "accessory",
+  "note": "mount"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Cordless Vacuum Spares or Repair",
+  "match": false,
+  "category": "vacuums",
+  "kind": "damaged",
+  "note": "spares"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Cordless Vacuum - Pulsing Battery Fault",
+  "match": false,
+  "category": "vacuums",
+  "kind": "damaged",
+  "note": "fault"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Box Only",
+  "match": false,
+  "category": "vacuums",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Refurbished by Dyson 1 Year Warranty",
+  "match": "ambiguous",
+  "category": "vacuums",
+  "kind": "exact",
+  "note": "refurbished"
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute Cordless Stick Vacuum with Tools Grey",
+  "match": true,
+  "category": "vacuums",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dyson v11 absolute",
+  "title": "Dyson V11 Absolute + Docking Station Wall Mount",
+  "match": true,
+  "category": "vacuums",
+  "kind": "bundle",
+  "note": "in-box dock"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 18V Brushless Combi Drill",
+  "match": true,
+  "category": "power tools",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Combi Drill 18V Yellow",
+  "match": true,
+  "category": "power tools",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "Dewalt DCD 796 18v combi drill",
+  "match": true,
+  "category": "power tools",
+  "kind": "reworded",
+  "note": "spaced code"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796N 18V XR Combi Hammer Drill",
+  "match": true,
+  "category": "power tools",
+  "kind": "reworded",
+  "note": "N suffix"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Brushless Hammer Drill Driver 18V XR Used Working",
+  "match": true,
+  "category": "power tools",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DEWALT DCD796-XJ 18V XR Brushless Compact Combi Drill",
+  "match": true,
+  "category": "power tools",
+  "kind": "reworded",
+  "note": "hyphen suffix"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 18V XR Brushless Combi Drill Body Only",
+  "match": "ambiguous",
+  "category": "power tools",
+  "kind": "exact",
+  "note": "body only per contract"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796D2 Combi Drill Kit 2 x 2Ah Batteries Charger Case",
+  "match": "ambiguous",
+  "category": "power tools",
+  "kind": "bundle",
+  "note": "battery kit"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD996 18V XR Combi Drill",
+  "match": false,
+  "category": "power tools",
+  "kind": "sibling_model",
+  "note": "DCD996"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD795 Combi Drill",
+  "match": false,
+  "category": "power tools",
+  "kind": "sibling_model",
+  "note": "DCD795"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Replacement Chuck 13mm",
+  "match": false,
+  "category": "power tools",
+  "kind": "part",
+  "note": "chuck"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Motor Armature Genuine Part",
+  "match": false,
+  "category": "power tools",
+  "kind": "part",
+  "note": "motor"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Side Handle",
+  "match": false,
+  "category": "power tools",
+  "kind": "accessory",
+  "note": "handle"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCB184 5Ah Battery for DCD796",
+  "match": false,
+  "category": "power tools",
+  "kind": "accessory",
+  "note": "battery for"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Tstak Case Inlay Only",
+  "match": false,
+  "category": "power tools",
+  "kind": "accessory",
+  "note": "case inlay"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Combi Drill Faulty Spares",
+  "match": false,
+  "category": "power tools",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Drill Smells Burning Stops Working",
+  "match": false,
+  "category": "power tools",
+  "kind": "damaged",
+  "note": "stops working"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "2x DeWalt DCD796 Combi Drills Body",
+  "match": false,
+  "category": "power tools",
+  "kind": "lot",
+  "note": "2x"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 + DCF887 Twin Pack Kit 2 Batteries",
+  "match": false,
+  "category": "power tools",
+  "kind": "bundle",
+  "note": "twin kit"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "Copy of DeWalt DCD796 Drill 21V Unbranded",
+  "match": false,
+  "category": "power tools",
+  "kind": "replica",
+  "note": "copy"
+ },
+ {
+  "query": "dewalt dcd796",
+  "title": "DeWalt DCD796 Combi Drill in TSTAK Case",
+  "match": true,
+  "category": "power tools",
+  "kind": "bundle",
+  "note": "minor case"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 116610LN Black 40mm 2015 Box & Papers",
+  "match": true,
+  "category": "watches",
+  "kind": "exact",
+  "note": "full set"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610LN Full Set 2018 Serviced",
+  "match": true,
+  "category": "watches",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex 116610LN Sub Date Black Ceramic 2012",
+  "match": true,
+  "category": "watches",
+  "kind": "reworded",
+  "note": "Sub abbreviation"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 116610 LN Ceramic Steel Mens Watch",
+  "match": true,
+  "category": "watches",
+  "kind": "reworded",
+  "note": "spaced suffix"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610LN Black Dial 40mm Steel",
+  "match": true,
+  "category": "watches",
+  "kind": "exact",
+  "note": "'dial' in full watch"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 116610LV Hulk Green",
+  "match": "ambiguous",
+  "category": "watches",
+  "kind": "variant",
+  "note": "LV hulk differs in price"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 126610LN 41mm 2021",
+  "match": false,
+  "category": "watches",
+  "kind": "sibling_model",
+  "note": "126610"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 16610 Date 2004 Steel",
+  "match": false,
+  "category": "watches",
+  "kind": "sibling_model",
+  "note": "16610"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 114060 No Date Ceramic",
+  "match": false,
+  "category": "watches",
+  "kind": "sibling_model",
+  "note": "114060"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610 Ceramic Bezel Insert Black",
+  "match": false,
+  "category": "watches",
+  "kind": "part",
+  "note": "bezel insert"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex 116610LN Oyster Bracelet 97200 Glidelock",
+  "match": false,
+  "category": "watches",
+  "kind": "part",
+  "note": "bracelet"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610 Dial Only Black Genuine",
+  "match": false,
+  "category": "watches",
+  "kind": "part",
+  "note": "dial only"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Sub 116610 Clasp Links Spare Link",
+  "match": false,
+  "category": "watches",
+  "kind": "part",
+  "note": "spare link"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610LN Box and Papers Only",
+  "match": false,
+  "category": "watches",
+  "kind": "packaging",
+  "note": "box & papers only"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610 Homage Automatic Watch",
+  "match": false,
+  "category": "watches",
+  "kind": "replica",
+  "note": "homage"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610 Style Rubber Strap 20mm",
+  "match": false,
+  "category": "watches",
+  "kind": "accessory",
+  "note": "strap"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Watch Winder Box for Rolex Submariner 116610",
+  "match": false,
+  "category": "watches",
+  "kind": "accessory",
+  "note": "winder"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610LN Display Case Wooden",
+  "match": false,
+  "category": "watches",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 116610LN Not Running Needs Service",
+  "match": false,
+  "category": "watches",
+  "kind": "damaged",
+  "note": "not running"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner Date 116610LN 2019 Unworn Stickers",
+  "match": true,
+  "category": "watches",
+  "kind": "exact",
+  "note": "factory stickers = unworn"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Submariner 116610LN Black 40mm Watch Only No Box",
+  "match": true,
+  "category": "watches",
+  "kind": "exact",
+  "note": "watch only = the item"
+ },
+ {
+  "query": "rolex submariner 116610",
+  "title": "Rolex Sub Date Ref 116610 Ceramic",
+  "match": true,
+  "category": "watches",
+  "kind": "reworded",
+  "note": "Sub abbreviation"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Eau de Parfum 100ml Spray",
+  "match": true,
+  "category": "fragrance",
+  "kind": "reworded",
+  "note": "long-form EDP"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Christian Dior Sauvage EDP 100ml Men's Fragrance New Sealed",
+  "match": true,
+  "category": "fragrance",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml 3.4 fl oz",
+  "match": true,
+  "category": "fragrance",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Eau De Parfum 3.4 oz 100 ml",
+  "match": true,
+  "category": "fragrance",
+  "kind": "reworded",
+  "note": "spaced ml"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Sauvage by Dior EDP 100ml",
+  "match": true,
+  "category": "fragrance",
+  "kind": "reworded",
+  "note": "word order"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Very Rare Batch 2018",
+  "match": true,
+  "category": "fragrance",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "DIOR SAUVAGE EDP 100 ML",
+  "match": true,
+  "category": "fragrance",
+  "kind": "reworded",
+  "note": "caps spaced"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Eau de Parfum 3.4 oz Spray for Men",
+  "match": true,
+  "category": "fragrance",
+  "kind": "reworded",
+  "note": "oz only (=100ml)"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDT 100ml",
+  "match": false,
+  "category": "fragrance",
+  "kind": "variant_mismatch",
+  "note": "EDT"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Eau de Toilette 100ml",
+  "match": false,
+  "category": "fragrance",
+  "kind": "variant_mismatch",
+  "note": "EDT long form"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 60ml",
+  "match": false,
+  "category": "fragrance",
+  "kind": "variant_mismatch",
+  "note": "60ml"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 10ml Sample Decant",
+  "match": false,
+  "category": "fragrance",
+  "kind": "variant_mismatch",
+  "note": "decant"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Elixir 100ml",
+  "match": false,
+  "category": "fragrance",
+  "kind": "sibling_model",
+  "note": "elixir"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage Parfum 100ml",
+  "match": false,
+  "category": "fragrance",
+  "kind": "sibling_model",
+  "note": "parfum not EDP"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Empty Bottle",
+  "match": false,
+  "category": "fragrance",
+  "kind": "packaging",
+  "note": "empty bottle"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Box Only",
+  "match": false,
+  "category": "fragrance",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Approx 80% Full",
+  "match": false,
+  "category": "fragrance",
+  "kind": "damaged",
+  "note": "partially used"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Inspired Alternative Dupe",
+  "match": false,
+  "category": "fragrance",
+  "kind": "replica",
+  "note": "dupe"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml x 2",
+  "match": false,
+  "category": "fragrance",
+  "kind": "lot",
+  "note": "x 2"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Tester No Cap",
+  "match": "ambiguous",
+  "category": "fragrance",
+  "kind": "exact",
+  "note": "tester"
+ },
+ {
+  "query": "dior sauvage edp 100ml",
+  "title": "Dior Sauvage EDP 100ml Gift Set with 10ml Travel Spray",
+  "match": "ambiguous",
+  "category": "fragrance",
+  "kind": "bundle",
+  "note": "gift set"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Pokemon Charizard 4/102 Base Set Holo Rare PSA 9 Mint",
+  "match": true,
+  "category": "trading cards",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Unlimited Holo 4/102 PSA 9 1999 WOTC",
+  "match": true,
+  "category": "trading cards",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "PSA9 Charizard Base Set Holo Pokemon Card",
+  "match": true,
+  "category": "trading cards",
+  "kind": "reworded",
+  "note": "glued grade"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "PSA 9 Base Set Charizard Holo Mint 4/102 Pokemon TCG",
+  "match": true,
+  "category": "trading cards",
+  "kind": "reworded",
+  "note": "word order"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Shadowless PSA 9",
+  "match": "ambiguous",
+  "category": "trading cards",
+  "kind": "variant",
+  "note": "shadowless price tier"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo PSA 9 Cracked Slab",
+  "match": "ambiguous",
+  "category": "trading cards",
+  "kind": "damaged",
+  "note": "slab not card"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo 4/102 PSA 8 NM-MT",
+  "match": false,
+  "category": "trading cards",
+  "kind": "variant_mismatch",
+  "note": "PSA 8"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo PSA 10 Gem Mint",
+  "match": false,
+  "category": "trading cards",
+  "kind": "variant_mismatch",
+  "note": "PSA 10"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo BGS 9 Mint",
+  "match": false,
+  "category": "trading cards",
+  "kind": "variant_mismatch",
+  "note": "BGS not PSA"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set 2 Holo 4/130 PSA 9",
+  "match": false,
+  "category": "trading cards",
+  "kind": "sibling_model",
+  "note": "base set 2"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "1st Edition Charizard Base Set PSA 9 Shadowless",
+  "match": false,
+  "category": "trading cards",
+  "kind": "sibling_model",
+  "note": "1st edition"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Celebrations Classic Base Set Holo PSA 9",
+  "match": false,
+  "category": "trading cards",
+  "kind": "sibling_model",
+  "note": "2021 reprint"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo 4/102 PSA 9 Japanese No.006",
+  "match": false,
+  "category": "trading cards",
+  "kind": "sibling_model",
+  "note": "japanese"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo 4/102 Ungraded Near Mint",
+  "match": false,
+  "category": "trading cards",
+  "kind": "sibling_model",
+  "note": "raw card"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set PSA 9 Empty Slab Case",
+  "match": false,
+  "category": "trading cards",
+  "kind": "packaging",
+  "note": "empty slab"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Graded Card Slab Display Stand for PSA 9 Charizard Base Set",
+  "match": false,
+  "category": "trading cards",
+  "kind": "accessory",
+  "note": "stand"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set PSA 9 Custom Proxy Card",
+  "match": false,
+  "category": "trading cards",
+  "kind": "replica",
+  "note": "proxy"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo PSA 9 Reprint Fan Art",
+  "match": false,
+  "category": "trading cards",
+  "kind": "replica",
+  "note": "reprint"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Base Set Holo PSA 9 + Blastoise PSA 9 Lot",
+  "match": false,
+  "category": "trading cards",
+  "kind": "lot",
+  "note": "lot"
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard Holo Base Set PSA 9 Mint Pokemon 1999 4/102",
+  "match": true,
+  "category": "trading cards",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Pokemon Base Set Charizard 4/102 Holo Graded PSA 9",
+  "match": true,
+  "category": "trading cards",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "charizard base set psa 9",
+  "title": "Charizard 1999 Base Unlimited PSA Mint 9",
+  "match": true,
+  "category": "trading cards",
+  "kind": "reworded",
+  "note": "grade split from PSA"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO Star Wars 75192 Millennium Falcon UCS New Sealed",
+  "match": true,
+  "category": "LEGO",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 UCS Millennium Falcon Complete with Instructions",
+  "match": true,
+  "category": "LEGO",
+  "kind": "exact",
+  "note": "complete"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "Lego Star Wars Millennium Falcon 75192 Retired",
+  "match": true,
+  "category": "LEGO",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "Lego UCS Falcon 75192 star wars",
+  "match": true,
+  "category": "LEGO",
+  "kind": "reworded",
+  "note": "Falcon only"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Built Once No Box",
+  "match": true,
+  "category": "LEGO",
+  "kind": "exact",
+  "note": "complete, no box"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millenium Falcon Ultimate Collector Series",
+  "match": true,
+  "category": "LEGO",
+  "kind": "reworded",
+  "note": "misspelt Millenium"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Box Damaged Sealed",
+  "match": "ambiguous",
+  "category": "LEGO",
+  "kind": "damaged",
+  "note": "box damage only"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO Star Wars 75257 Millennium Falcon",
+  "match": false,
+  "category": "LEGO",
+  "kind": "sibling_model",
+  "note": "75257"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 10179 UCS Millennium Falcon 2007",
+  "match": false,
+  "category": "LEGO",
+  "kind": "sibling_model",
+  "note": "10179"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LED Light Kit for LEGO 75192 Millennium Falcon",
+  "match": false,
+  "category": "LEGO",
+  "kind": "accessory",
+  "note": "light kit"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "Display Stand for LEGO 75192 Millennium Falcon Acrylic",
+  "match": false,
+  "category": "LEGO",
+  "kind": "accessory",
+  "note": "stand"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Instruction Manual Books Only",
+  "match": false,
+  "category": "LEGO",
+  "kind": "part",
+  "note": "manual"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Han Solo Minifigure Only",
+  "match": false,
+  "category": "LEGO",
+  "kind": "part",
+  "note": "minifigure"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Bags 1-8 Only Incomplete",
+  "match": false,
+  "category": "LEGO",
+  "kind": "part",
+  "note": "partial bags"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Sticker Sheet",
+  "match": false,
+  "category": "LEGO",
+  "kind": "part",
+  "note": "stickers"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Missing Pieces 95% Complete",
+  "match": false,
+  "category": "LEGO",
+  "kind": "damaged",
+  "note": "missing pieces"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO 75192 Millennium Falcon Empty Box",
+  "match": false,
+  "category": "LEGO",
+  "kind": "packaging",
+  "note": "empty box"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "Lepin 05132 Millennium Falcon UCS Compatible 75192",
+  "match": false,
+  "category": "LEGO",
+  "kind": "replica",
+  "note": "knock-off"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "Lego Star Wars Millennium Falcon Poster 75192",
+  "match": false,
+  "category": "LEGO",
+  "kind": "media",
+  "note": "poster"
+ },
+ {
+  "query": "lego 75192 millennium falcon",
+  "title": "LEGO Star Wars UCS Millennium Falcon (75192) 7541 Pieces",
+  "match": true,
+  "category": "LEGO",
+  "kind": "exact",
+  "note": "piece count"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "NVIDIA GeForce RTX 4070 Founders Edition 12GB GDDR6X",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "rtx 4070",
+  "title": "MSI GeForce RTX 4070 Ventus 2X 12G OC",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": "2X is cooler name"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "ASUS Dual GeForce RTX 4070 OC 12GB",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": "'Dual' cooler"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Zotac Gaming RTX 4070 Twin Edge OC 12GB",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": "'Twin' cooler"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Palit GeForce RTX 4070 Dual 12GB GDDR6X Graphics Card",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "rtx 4070",
+  "title": "PNY RTX 4070 12GB VERTO Dual Fan",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Nvidia RTX4070 FE 12GB",
+  "match": true,
+  "category": "GPUs",
+  "kind": "reworded",
+  "note": "glued RTX4070"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Gigabyte RTX 4070 Windforce OC 12G 3 Fans",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Asus TUF RTX 4070 12GB OC Edition - Coil Whine",
+  "match": "ambiguous",
+  "category": "GPUs",
+  "kind": "damaged",
+  "note": "minor fault"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "MSI GeForce RTX 4070 Ti Gaming X Trio 12GB",
+  "match": false,
+  "category": "GPUs",
+  "kind": "sibling_model",
+  "note": "Ti"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 SUPER 12GB Asus Dual",
+  "match": false,
+  "category": "GPUs",
+  "kind": "sibling_model",
+  "note": "Super"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Gigabyte RTX 4060 Ti 8GB",
+  "match": false,
+  "category": "GPUs",
+  "kind": "sibling_model",
+  "note": "4060"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 12GB Faulty Artifacts",
+  "match": false,
+  "category": "GPUs",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 12GB for parts no display",
+  "match": false,
+  "category": "GPUs",
+  "kind": "damaged",
+  "note": "for parts"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 Graphics Card Backplate",
+  "match": false,
+  "category": "GPUs",
+  "kind": "part",
+  "note": "backplate"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 GPU Support Bracket Anti Sag",
+  "match": false,
+  "category": "GPUs",
+  "kind": "accessory",
+  "note": "bracket"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "12VHPWR Cable for RTX 4070 4080 4090",
+  "match": false,
+  "category": "GPUs",
+  "kind": "accessory",
+  "note": "cable"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Gaming PC Ryzen 7 RTX 4070 32GB RAM 1TB",
+  "match": false,
+  "category": "GPUs",
+  "kind": "bundle",
+  "note": "whole PC"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "Gaming Laptop RTX 4070 i7 16GB",
+  "match": false,
+  "category": "GPUs",
+  "kind": "unrelated",
+  "note": "laptop GPU"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 Box Only",
+  "match": false,
+  "category": "GPUs",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "RTX 4070 Mining Used x4",
+  "match": false,
+  "category": "GPUs",
+  "kind": "lot",
+  "note": "x4"
+ },
+ {
+  "query": "rtx 4070",
+  "title": "MSI RTX 4070 Gaming X Trio 12G Graphics Card",
+  "match": true,
+  "category": "GPUs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Triple White UK 9 EU 44",
+  "match": true,
+  "category": "trainers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Mens Trainers Size UK 9 Black",
+  "match": true,
+  "category": "trainers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK9 Infrared",
+  "match": true,
+  "category": "trainers",
+  "kind": "reworded",
+  "note": "glued UK9"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Size 9 UK",
+  "match": true,
+  "category": "trainers",
+  "kind": "reworded",
+  "note": "size first"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 US 10 Mens",
+  "match": true,
+  "category": "trainers",
+  "kind": "reworded",
+  "note": "US 10 = UK 9"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Essential UK 9 Grey",
+  "match": true,
+  "category": "trainers",
+  "kind": "variant",
+  "note": "essential colourway"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike AirMax 90 UK 9",
+  "match": true,
+  "category": "trainers",
+  "kind": "reworded",
+  "note": "glued AirMax"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Premium UK 9",
+  "match": "ambiguous",
+  "category": "trainers",
+  "kind": "variant",
+  "note": "premium release"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Womens UK 9",
+  "match": "ambiguous",
+  "category": "trainers",
+  "kind": "variant",
+  "note": "womens sizing"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK 9.5",
+  "match": false,
+  "category": "trainers",
+  "kind": "variant_mismatch",
+  "note": "9.5"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK 8",
+  "match": false,
+  "category": "trainers",
+  "kind": "variant_mismatch",
+  "note": "8"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Kids UK 9 Junior",
+  "match": false,
+  "category": "trainers",
+  "kind": "variant_mismatch",
+  "note": "kids 9"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 95 UK 9",
+  "match": false,
+  "category": "trainers",
+  "kind": "sibling_model",
+  "note": "95"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 1 UK 9",
+  "match": false,
+  "category": "trainers",
+  "kind": "sibling_model",
+  "note": "1"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Laces Pair White",
+  "match": false,
+  "category": "trainers",
+  "kind": "accessory",
+  "note": "laces"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK 9 Box Only",
+  "match": false,
+  "category": "trainers",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Left Shoe Only UK 9",
+  "match": false,
+  "category": "trainers",
+  "kind": "part",
+  "note": "single shoe"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK 9 Fake Rep",
+  "match": false,
+  "category": "trainers",
+  "kind": "replica",
+  "note": "rep"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 UK 9 Worn Holes Heel",
+  "match": false,
+  "category": "trainers",
+  "kind": "damaged",
+  "note": "holes"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "2 Pairs Nike Air Max 90 UK 9",
+  "match": false,
+  "category": "trainers",
+  "kind": "lot",
+  "note": "2 pairs"
+ },
+ {
+  "query": "nike air max 90 uk 9",
+  "title": "Nike Air Max 90 Bacon UK 9 2021",
+  "match": true,
+  "category": "trainers",
+  "kind": "variant",
+  "note": "colourway"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C36LC 55 Inch C3 4K OLED evo Smart TV",
+  "match": true,
+  "category": "TVs",
+  "kind": "exact",
+  "note": "regional suffix"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 55\" 4K OLED TV",
+  "match": true,
+  "category": "TVs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED 55 C3 4K TV OLED55C3PUA",
+  "match": true,
+  "category": "TVs",
+  "kind": "exact",
+  "note": "US suffix"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C34LA 55\" C3 Smart TV",
+  "match": true,
+  "category": "TVs",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG C3 55 Inch OLED TV",
+  "match": true,
+  "category": "TVs",
+  "kind": "reworded",
+  "note": "no model code"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Smart TV with Wall Bracket Fitted",
+  "match": true,
+  "category": "TVs",
+  "kind": "bundle",
+  "note": "minor extra"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Ex Display Grade A",
+  "match": "ambiguous",
+  "category": "TVs",
+  "kind": "exact",
+  "note": "ex display"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED65C3 65 Inch 4K OLED",
+  "match": false,
+  "category": "TVs",
+  "kind": "variant_mismatch",
+  "note": "65 inch"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C2 55 Inch",
+  "match": false,
+  "category": "TVs",
+  "kind": "sibling_model",
+  "note": "C2"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55B3 55 Inch",
+  "match": false,
+  "category": "TVs",
+  "kind": "sibling_model",
+  "note": "B3"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Remote Control Magic MR23GN",
+  "match": false,
+  "category": "TVs",
+  "kind": "accessory",
+  "note": "remote"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Stand Feet Legs",
+  "match": false,
+  "category": "TVs",
+  "kind": "part",
+  "note": "stand feet"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Main Board EBU",
+  "match": false,
+  "category": "TVs",
+  "kind": "part",
+  "note": "main board"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Screen Panel Only",
+  "match": false,
+  "category": "TVs",
+  "kind": "part",
+  "note": "panel"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 Cracked Screen Spares",
+  "match": false,
+  "category": "TVs",
+  "kind": "damaged",
+  "note": "cracked"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 55 Inch TV Lines on Screen",
+  "match": false,
+  "category": "TVs",
+  "kind": "damaged",
+  "note": "lines on screen"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG OLED55C3 TV Box Packaging",
+  "match": false,
+  "category": "TVs",
+  "kind": "packaging",
+  "note": "box"
+ },
+ {
+  "query": "lg oled55c3",
+  "title": "LG 55 Inch OLED55C3 evo 4K Smart TV 2023 Remote Included",
+  "match": true,
+  "category": "TVs",
+  "kind": "exact",
+  "note": "in-box remote"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja Foodi Dual Zone Air Fryer AF300UK 7.6L",
+  "match": true,
+  "category": "kitchen",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Dual Zone Air Fryer Black",
+  "match": true,
+  "category": "kitchen",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300 Dual Air Fryer",
+  "match": true,
+  "category": "kitchen",
+  "kind": "reworded",
+  "note": "no UK suffix"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja Air Fryer Dual Zone AF300UK Filter-Free Easy Clean",
+  "match": true,
+  "category": "kitchen",
+  "kind": "exact",
+  "note": "'filter-free' feature"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Air Fryer Mint Used Twice",
+  "match": true,
+  "category": "kitchen",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "NINJA AF-300UK Foodi 2 Drawer Air Fryer 7.6 Litre",
+  "match": true,
+  "category": "kitchen",
+  "kind": "reworded",
+  "note": "hyphenated code"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Air Fryer Ex Display",
+  "match": "ambiguous",
+  "category": "kitchen",
+  "kind": "exact",
+  "note": "ex display"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Dual Zone Air Fryer - Small Dent Fully Working",
+  "match": "ambiguous",
+  "category": "kitchen",
+  "kind": "damaged",
+  "note": "cosmetic"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF400UK Dual Zone Air Fryer 9.5L",
+  "match": false,
+  "category": "kitchen",
+  "kind": "sibling_model",
+  "note": "AF400"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF100UK Air Fryer",
+  "match": false,
+  "category": "kitchen",
+  "kind": "sibling_model",
+  "note": "AF100"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja Foodi Max Dual Zone AF400UK",
+  "match": false,
+  "category": "kitchen",
+  "kind": "sibling_model",
+  "note": "AF400"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Crisper Plate Replacement",
+  "match": false,
+  "category": "kitchen",
+  "kind": "part",
+  "note": "crisper plate"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Drawer Basket Only",
+  "match": false,
+  "category": "kitchen",
+  "kind": "part",
+  "note": "basket only"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Silicone Liners for Ninja AF300UK 2 Pack",
+  "match": false,
+  "category": "kitchen",
+  "kind": "accessory",
+  "note": "liners"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Air Fryer Not Heating Faulty",
+  "match": false,
+  "category": "kitchen",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Box Only",
+  "match": false,
+  "category": "kitchen",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja Foodi AF300UK Recipe Book",
+  "match": false,
+  "category": "kitchen",
+  "kind": "media",
+  "note": "book"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja AF300UK Air Fryer x 2",
+  "match": false,
+  "category": "kitchen",
+  "kind": "lot",
+  "note": "x 2"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Cosori Dual Basket Air Fryer 8.5L like Ninja AF300UK",
+  "match": false,
+  "category": "kitchen",
+  "kind": "unrelated",
+  "note": "other brand"
+ },
+ {
+  "query": "ninja af300uk",
+  "title": "Ninja Dual Zone AF300UK 2 Basket Air Fryer",
+  "match": true,
+  "category": "kitchen",
+  "kind": "exact",
+  "note": "'2 basket' is a feature"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Amazon Kindle Paperwhite 11th Generation 8GB Black",
+  "match": true,
+  "category": "e-readers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 5 11th Gen Ad-Supported",
+  "match": true,
+  "category": "e-readers",
+  "kind": "reworded",
+  "note": "PW5 alias"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 2021 11th Gen",
+  "match": true,
+  "category": "e-readers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11 Gen M2L3EK",
+  "match": true,
+  "category": "e-readers",
+  "kind": "reworded",
+  "note": "no ordinal"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen 8GB Agave Green",
+  "match": true,
+  "category": "e-readers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Amazon Kindle Paperwhite 6.8 inch 2021 model",
+  "match": true,
+  "category": "e-readers",
+  "kind": "reworded",
+  "note": "no gen stated"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite (11th Gen) 6.8\" 32GB Signature Edition",
+  "match": "ambiguous",
+  "category": "e-readers",
+  "kind": "variant",
+  "note": "signature edition"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Kids Edition with Cover",
+  "match": "ambiguous",
+  "category": "e-readers",
+  "kind": "bundle",
+  "note": "kids edition"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 10th Generation 8GB",
+  "match": false,
+  "category": "e-readers",
+  "kind": "sibling_model",
+  "note": "10th"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 12th Gen 2024",
+  "match": false,
+  "category": "e-readers",
+  "kind": "sibling_model",
+  "note": "12th"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Oasis 10th Gen",
+  "match": false,
+  "category": "e-readers",
+  "kind": "sibling_model",
+  "note": "oasis"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Cover Case Fabric",
+  "match": false,
+  "category": "e-readers",
+  "kind": "accessory",
+  "note": "cover"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Sleeve Pouch",
+  "match": false,
+  "category": "e-readers",
+  "kind": "accessory",
+  "note": "sleeve"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Battery Replacement",
+  "match": false,
+  "category": "e-readers",
+  "kind": "part",
+  "note": "battery"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Frozen Screen Spares",
+  "match": false,
+  "category": "e-readers",
+  "kind": "damaged",
+  "note": "spares"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Dead Pixels Working",
+  "match": false,
+  "category": "e-readers",
+  "kind": "damaged",
+  "note": "dead pixels"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen Box Only",
+  "match": false,
+  "category": "e-readers",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "kindle paperwhite 11th gen",
+  "title": "Kindle Paperwhite 11th Gen With Case Black 8GB",
+  "match": true,
+  "category": "e-readers",
+  "kind": "bundle",
+  "note": "minor case"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone with RC Controller",
+  "match": true,
+  "category": "drones",
+  "kind": "exact",
+  "note": "standard controller"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone 4K Camera Grey",
+  "match": true,
+  "category": "drones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone Boxed Mint Low Hours",
+  "match": true,
+  "category": "drones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini3 Pro drone",
+  "match": true,
+  "category": "drones",
+  "kind": "reworded",
+  "note": "glued mini3"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone + DJI RC-N1 Remote",
+  "match": true,
+  "category": "drones",
+  "kind": "exact",
+  "note": "standard remote"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Fly More Combo Plus",
+  "match": "ambiguous",
+  "category": "drones",
+  "kind": "bundle",
+  "note": "fly more combo"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Drone",
+  "match": false,
+  "category": "drones",
+  "kind": "sibling_model",
+  "note": "non-pro"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 4 Pro",
+  "match": false,
+  "category": "drones",
+  "kind": "sibling_model",
+  "note": "mini 4"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 2 SE",
+  "match": false,
+  "category": "drones",
+  "kind": "sibling_model",
+  "note": "mini 2 se"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Propellers Replacement",
+  "match": false,
+  "category": "drones",
+  "kind": "accessory",
+  "note": "props"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Intelligent Flight Battery",
+  "match": false,
+  "category": "drones",
+  "kind": "accessory",
+  "note": "battery"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Carry Bag",
+  "match": false,
+  "category": "drones",
+  "kind": "accessory",
+  "note": "bag"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro ND Filters Set",
+  "match": false,
+  "category": "drones",
+  "kind": "accessory",
+  "note": "filters"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Gimbal Camera Repair Part",
+  "match": false,
+  "category": "drones",
+  "kind": "part",
+  "note": "gimbal"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Aircraft Only No Controller",
+  "match": false,
+  "category": "drones",
+  "kind": "part",
+  "note": "incomplete"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro RC Controller Only",
+  "match": false,
+  "category": "drones",
+  "kind": "part",
+  "note": "controller only"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone Crashed Gimbal Error",
+  "match": false,
+  "category": "drones",
+  "kind": "damaged",
+  "note": "crashed"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone Box Only",
+  "match": false,
+  "category": "drones",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro (DJI RC) Smart Controller Drone",
+  "match": true,
+  "category": "drones",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "dji mini 3 pro",
+  "title": "DJI Mini 3 Pro Drone with Original Case and Charger",
+  "match": true,
+  "category": "drones",
+  "kind": "bundle",
+  "note": "in-box extras"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M2 13.6\" 8GB 256GB Midnight 2022",
+  "match": true,
+  "category": "laptops",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple Mac Book Air M2 Space Grey",
+  "match": true,
+  "category": "laptops",
+  "kind": "reworded",
+  "note": "spaced alias"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air 13 inch 2022 Apple M2 chip 8GB RAM",
+  "match": true,
+  "category": "laptops",
+  "kind": "reworded",
+  "note": ""
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air (M2, 2022) 16GB 512GB Silver",
+  "match": true,
+  "category": "laptops",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 2022 A2681 Starlight 8GB 256GB SSD",
+  "match": true,
+  "category": "laptops",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 15 inch 8GB 512GB Starlight",
+  "match": "ambiguous",
+  "category": "laptops",
+  "kind": "variant",
+  "note": "15in unpinned size"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M2 + Magic Mouse Bundle",
+  "match": "ambiguous",
+  "category": "laptops",
+  "kind": "bundle",
+  "note": "mouse extra"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air 13 M1 2020",
+  "match": false,
+  "category": "laptops",
+  "kind": "sibling_model",
+  "note": "M1"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M3 13 2024",
+  "match": false,
+  "category": "laptops",
+  "kind": "sibling_model",
+  "note": "M3"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Pro M2 13",
+  "match": false,
+  "category": "laptops",
+  "kind": "sibling_model",
+  "note": "pro"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 Hard Shell Case Clear",
+  "match": false,
+  "category": "laptops",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 USB-C 35W Dual Port Charger",
+  "match": false,
+  "category": "laptops",
+  "kind": "accessory",
+  "note": "charger"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 Logic Board 8GB",
+  "match": false,
+  "category": "laptops",
+  "kind": "part",
+  "note": "logic board"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 Screen Assembly A2681",
+  "match": false,
+  "category": "laptops",
+  "kind": "part",
+  "note": "screen"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M2 Activation Locked Spares",
+  "match": false,
+  "category": "laptops",
+  "kind": "damaged",
+  "note": "locked"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 2022 Cracked Display",
+  "match": false,
+  "category": "laptops",
+  "kind": "damaged",
+  "note": "cracked"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 MDM Locked",
+  "match": false,
+  "category": "laptops",
+  "kind": "damaged",
+  "note": "mdm lock"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 Box Only",
+  "match": false,
+  "category": "laptops",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "MacBook Air M2 Midnight 256GB with Charger Excellent",
+  "match": true,
+  "category": "laptops",
+  "kind": "bundle",
+  "note": "in-box charger"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M2 2022 8-Core CPU 8GB 256GB",
+  "match": true,
+  "category": "laptops",
+  "kind": "exact",
+  "note": "8-core spec"
+ },
+ {
+  "query": "macbook air m2",
+  "title": "Apple MacBook Air M2 13-inch Starlight A2681 Boxed",
+  "match": true,
+  "category": "laptops",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank PowerCore 24K 140W Portable Charger",
+  "match": true,
+  "category": "chargers",
+  "kind": "exact",
+  "note": "'charger' in product name"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank 24000mAh 140W Black",
+  "match": true,
+  "category": "chargers",
+  "kind": "exact",
+  "note": ""
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 PowerCore 24K A1289",
+  "match": true,
+  "category": "chargers",
+  "kind": "reworded",
+  "note": "no 'power bank'"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank Brand New Boxed with Cable",
+  "match": true,
+  "category": "chargers",
+  "kind": "bundle",
+  "note": "in-box cable"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Powerbank 24000mAh 140W Laptop",
+  "match": true,
+  "category": "chargers",
+  "kind": "reworded",
+  "note": "glued powerbank"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Charger GaNPrime 120W 3 Port",
+  "match": false,
+  "category": "chargers",
+  "kind": "sibling_model",
+  "note": "737 charger"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 733 Power Bank GaNPrime PowerCore 65W",
+  "match": false,
+  "category": "chargers",
+  "kind": "sibling_model",
+  "note": "733"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 537 Power Bank 24000mAh",
+  "match": false,
+  "category": "chargers",
+  "kind": "sibling_model",
+  "note": "537"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank Case Travel Pouch",
+  "match": false,
+  "category": "chargers",
+  "kind": "accessory",
+  "note": "case"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "USB C Cable for Anker 737 Power Bank 240W",
+  "match": false,
+  "category": "chargers",
+  "kind": "accessory",
+  "note": "cable"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank Faulty Won't Charge",
+  "match": false,
+  "category": "chargers",
+  "kind": "damaged",
+  "note": "faulty"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank 24K Swollen Battery",
+  "match": false,
+  "category": "chargers",
+  "kind": "damaged",
+  "note": "swollen"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank x2",
+  "match": false,
+  "category": "chargers",
+  "kind": "lot",
+  "note": "x2"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank Box Only",
+  "match": false,
+  "category": "chargers",
+  "kind": "packaging",
+  "note": "box only"
+ },
+ {
+  "query": "anker 737 power bank",
+  "title": "Anker 737 Power Bank (PowerCore 24K) Grey Used",
+  "match": true,
+  "category": "chargers",
+  "kind": "exact",
+  "note": ""
+ }
+]

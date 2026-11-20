@@ -29,7 +29,9 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from .pricing import FairValue
 from .formatting import (
+    evidence_line,
     EBAY_DOMAINS,
     format_listing_type,
     format_money,
@@ -131,6 +133,7 @@ SLASH_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("unwatch", "Stop a market watch", "<id>  (ids from /watches)"),
     ("watches", "Market watches with market estimate, variant and trend", None),
+    ("quote", "Fair value, confidence and evidence for a watch", "<id>"),
     ("demand", "Demand / liquidity read for a watch", "<id>"),
     ("refimage", "Pin, show or clear a watch's reference photo", "<id> [image-url | clear]"),
     ("invites", "Admins and invited users", None),
@@ -754,6 +757,8 @@ class DiscordBot:
         lot_quantity: int | None = None,
         vision: str = "",
         offer_estimate: float | None = None,
+        quote: FairValue | None = None,
+        quick_profit: float | None = None,
     ) -> discord.Embed:
         saving = market_price - item.total_price
         cur = item.currency
@@ -780,7 +785,14 @@ class DiscordBot:
             market_label = f"📊 Market ≈ {format_money(market_price, cur)}"
             if variant:
                 market_label += f" for {variant}"
-            if distribution:
+            if quote is not None:
+                # The interval is our uncertainty about fair value, not the
+                # spread of listings — a wide one means "treat this with care".
+                market_label += (
+                    f" (likely {format_money(quote.low, cur)}–{format_money(quote.high, cur)}"
+                    f", {quote.confidence}% confidence)"
+                )
+            elif distribution:
                 low, _mid, high = distribution
                 market_label += f" (range {format_money(low, cur)}–{format_money(high, cur)})"
             if is_offer:
@@ -813,9 +825,19 @@ class DiscordBot:
             escape_md(market_label),
             escape_md(save_line),
         ]
+        evidence = evidence_line(quote, cur) if not lot_quantity else ""
+        if evidence:
+            lines.append(escape_md(f"🧮 {evidence}"))
         if profit is not None:
             roi_text = f" ({roi:+.0f}% ROI)" if roi is not None else ""
-            lines.append(escape_md(f"💵 Est. flip profit ≈ {format_money(profit, cur)}{roi_text}"))
+            quick_text = (
+                f" · {format_money(quick_profit, cur)} if sold fast"
+                if quick_profit is not None
+                else ""
+            )
+            lines.append(
+                escape_md(f"💵 Est. flip profit ≈ {format_money(profit, cur)}{roi_text}{quick_text}")
+            )
         if comps:
             joined = " · ".join(format_money(price, cur) for price in comps)
             lines.append(escape_md(f"🧾 Recently sold: {joined}"))
