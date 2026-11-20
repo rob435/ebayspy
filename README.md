@@ -1,12 +1,14 @@
 # ebayspy
 
-Track specific eBay sellers and items and receive Telegram notifications when they list new items.
+Track specific eBay sellers from a VPS (or a Mac) and receive Discord alerts when they list new
+items — plus a market-watch lane that flags below-market deals.
 
 ## What it does
 
 - Watches a persistent list of seller usernames.
 - Polls every 15 minutes by default.
-- Sends Telegram alerts with title, price, seller, description snippet, and item link.
+- Sends Discord alerts (rich embeds with the item photo) with title, price, seller, description
+  snippet, and item link.
 - Shows the seller as a clickable profile link with their eBay rating, e.g. `98.6% (1004)`
   (positive-feedback percentage and total feedback count), plus the listed time, on every
   alert — new, restock, price drop, ended/sold, and market deals.
@@ -64,7 +66,7 @@ Track specific eBay sellers and items and receive Telegram notifications when th
   - A floor (default 40% of market) suppresses "too good to be true" listings that are
     almost always the wrong item or a scam; a minimum comparable-sample gate refuses to
     price (or alert) until enough comparables back the median; and alerts are capped per
-    cycle so a backlog never floods the chat.
+    cycle so a backlog never floods the channel.
   - You can refine matching per watch: add `exclude:tap` (or `-tap`) to drop unwanted
     variants, `condition:new|used`, and `under:PRICE` to bound the sample.
   - **Real sold prices (optional).** By default the market figure is a live-asking estimate
@@ -77,7 +79,7 @@ Track specific eBay sellers and items and receive Telegram notifications when th
     profit & ROI** (market minus buy price minus configurable eBay fees), a **price trend**
     (e.g. `Market -8% vs 7d`), a **demand/liquidity read**, the **price spread** (P10–P90)
     and **recent sold comps** (with Insights), a best-offer flag, the seller rating/link, and
-    inline buttons to open the listing, **mute that variant**, flag a **wrong match**
+    buttons to open the listing, **mute that variant**, flag a **wrong match**
     (which teaches the watch a new exclude term), or rate the deal **👍/👎** (which tunes the
     watch's required discount over time).
   - **Best-offer candidates** (`MARKET_OFFER_AWARE=true`). Flags Best-Offer listings whose
@@ -129,7 +131,8 @@ Track specific eBay sellers and items and receive Telegram notifications when th
   - No floor means **any price** alerts, so existing sellers are unaffected.
   - The floor is currency-agnostic (it compares the listing's numeric amount) and fails
     open: if a price can't be parsed, the item still alerts.
-- Lets you manage sellers from Telegram:
+- Lets you manage everything from Discord — as slash commands (`/add`, `/watch`, …; the text
+  after the command goes in the single `args` box) or typed as `!add …` / `/add …` text:
   - `/add sellername [minprice]` — e.g. `/add acme` or `/add lithosale [100]`
   - `/remove sellername`
   - `/list` — sellers with their price floor, if any
@@ -151,11 +154,12 @@ Track specific eBay sellers and items and receive Telegram notifications when th
   - `/refimage <id> <image-url>` — pin the reference "stock" photo a watch matches listings
     against (`/refimage <id>` shows it, `/refimage <id> clear` reverts to auto)
   - `/help`
-  - **Tap to remove:** `/list`, `/observing` and `/watches` each render a 🗑 button per row —
-    tap it to drop that seller/watch without retyping its name or id; the list refreshes in place.
-- Lets configured admins manage invite-only access from Telegram:
-  - `/invite @username`
-  - `/uninvite @username`
+  - **Click to remove:** `/list`, `/observing` and `/watches` each render a 🗑 button per row
+    (up to 25) — click it to drop that seller/watch without retyping its name or id; the list
+    refreshes in place.
+- Lets configured admins manage invite-only access from Discord:
+  - `/invite @user` (a user picker in the slash UI)
+  - `/uninvite @user`
   - `/invites`
 
 ## Setup
@@ -170,7 +174,8 @@ Copy-Item .env.example .env
 Edit `.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456:your_bot_token
+DISCORD_BOT_TOKEN=your_bot_token
+DISCORD_CHANNEL_ID=123456789012345678
 EBAY_APP_ID=your-ebay-app-id
 EBAY_CLIENT_SECRET=your-ebay-cert-id
 SELLERS=seller_one,seller_two
@@ -180,10 +185,34 @@ ebayspy reads seller listings from the official eBay Browse API. Register an
 application at the [eBay Developers Program](https://developer.ebay.com/), then copy the
 Production keyset's **App ID (Client ID)** and **Cert ID (Client Secret)** into `.env`.
 
-Create a Telegram bot with BotFather, put its token in `.env`, then send `/start` to the bot.
-If `TELEGRAM_CHAT_ID` is omitted, the app records chats that use `/start` and sends alerts there.
-Set `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_CHAT_IDS` to a comma-separated allowlist
-to make the bot invite-only.
+### Discord bot
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications) → **New
+   Application** → give it a name (e.g. `ebayspy`).
+2. **Bot** tab → **Reset Token** → copy the token into `.env` as `DISCORD_BOT_TOKEN`.
+   Leave *Message Content Intent* off unless you want `!add …` text commands in server
+   channels (slash commands and DMs never need it; if you turn it on, also set
+   `DISCORD_MESSAGE_CONTENT_INTENT=true`).
+3. **OAuth2 → URL Generator**: tick the scopes `bot` and `applications.commands`, and the bot
+   permissions *Send Messages*, *Embed Links*, *Read Message History*. Open the generated URL
+   and add the bot to your server (a private server with just you in it works well).
+4. Pick the channel that should receive alerts. Turn on *Developer Mode* (User Settings →
+   Advanced), right-click the channel → **Copy Channel ID**, and set `DISCORD_CHANNEL_ID`.
+   Alternatively leave it empty: any channel (or DM with the bot) where you run `/help` is
+   remembered and alerted from then on.
+5. Start ebayspy and type `/help` in that channel. Slash commands register globally on the
+   first connect and can take a few minutes (and a Discord client restart) to appear in the
+   picker; `!help` typed as text works straight away in a DM.
+
+To make the bot invite-only, set `DISCORD_ALLOWED_USERNAMES` (your Discord username — the
+unique lowercase handle, not the display name) and/or `DISCORD_ALLOWED_CHANNEL_IDS` (channels
+where anyone present may command it). Users named in `DISCORD_ALLOWED_USERNAMES` are admins
+and can `/invite` others. Leave both empty for an open bot.
+
+> **Migrating from the Telegram version?** The first start on an existing database clears the
+> owner of watches created from Telegram (they now broadcast to every configured channel) and
+> resets `/invite`d Telegram usernames, since neither means anything to Discord. Everything
+> else — sellers, watches, seen-item history, deal history — carries over untouched.
 
 ## Run
 
@@ -240,7 +269,7 @@ scripts/install-wakepoll.sh     # com.ebayspy.wakepoll — wakes a sleeping Mac 
 sudo scripts/enable-wake-sudo.sh  # one-off: lets the agent arm wakes (pmset) without a password
 ```
 
-- **Tracker** (`com.ebayspy.tracker`, `ebayspy run`) handles Telegram commands and the
+- **Tracker** (`com.ebayspy.tracker`, `ebayspy run`) handles Discord commands and the
   observe/market fast lanes in real time — but only while the Mac is awake.
 - **Wake-poll** (`com.ebayspy.wakepoll`, `ebayspy wakepoll`) runs on a 6-hour calendar
   schedule (00/06/12/18). Each run polls once, sends a heartbeat (if enabled), then arms

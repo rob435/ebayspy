@@ -47,7 +47,7 @@ class FakeEbay:
         return list(getattr(self, "sold_items", []))
 
 
-class FakeTelegram:
+class FakeDiscord:
     def __init__(self) -> None:
         self.quantity_increases: list[tuple[str, str, int, int]] = []
         self.listings: list[tuple[str, str]] = []
@@ -57,40 +57,38 @@ class FakeTelegram:
         self.messages: list[tuple[str, str, dict | None]] = []
         self.edits: list[tuple[str, int, str, dict | None]] = []
 
-    async def send_message(
-        self, chat_id: str, text: str, disable_preview: bool = False, reply_markup=None
-    ) -> None:
-        self.messages.append((chat_id, text, reply_markup))
+    async def send_message(self, channel_id: str, text: str, buttons=None) -> int:
+        self.messages.append((channel_id, text, buttons))
+        return len(self.messages)
 
     async def edit_message(
-        self, chat_id: str, message_id: int, text: str, reply_markup=None,
-        disable_preview: bool = True,
+        self, channel_id: str, message_id: int, text: str, buttons=None
     ) -> None:
-        self.edits.append((chat_id, message_id, text, reply_markup))
+        self.edits.append((channel_id, message_id, text, buttons))
 
-    async def notify_listing(self, chat_id: str, listing: Listing) -> None:
-        self.listings.append((chat_id, listing.item_id))
+    async def notify_listing(self, channel_id: str, listing: Listing) -> None:
+        self.listings.append((channel_id, listing.item_id))
 
     async def notify_ended_listing(
-        self, chat_id: str, listing: Listing, ended_at: str | None = None
+        self, channel_id: str, listing: Listing, ended_at: str | None = None
     ) -> None:
-        self.ended.append((chat_id, listing.item_id))
+        self.ended.append((channel_id, listing.item_id))
 
     async def notify_quantity_increase(
-        self, chat_id: str, listing: Listing, previous_quantity: int, current_quantity: int
+        self, channel_id: str, listing: Listing, previous_quantity: int, current_quantity: int
     ) -> None:
         self.quantity_increases.append(
-            (chat_id, listing.item_id, previous_quantity, current_quantity)
+            (channel_id, listing.item_id, previous_quantity, current_quantity)
         )
 
     async def notify_price_drop(
-        self, chat_id: str, listing: Listing, old_price: float, new_price: float, pct: float
+        self, channel_id: str, listing: Listing, old_price: float, new_price: float, pct: float
     ) -> None:
-        self.price_drops.append((chat_id, listing.item_id, old_price, new_price))
+        self.price_drops.append((channel_id, listing.item_id, old_price, new_price))
 
     async def notify_deal(
         self,
-        chat_id: str,
+        channel_id: str,
         item,
         *,
         market_price: float,
@@ -111,11 +109,11 @@ class FakeTelegram:
         vision: str = "",
         offer_estimate: float | None = None,
     ) -> None:
-        self.deals.append((chat_id, item.item_id, item.total_price))
+        self.deals.append((channel_id, item.item_id, item.total_price))
 
 
-class FlakyTelegram(FakeTelegram):
-    """Telegram double whose sends raise while ``fail`` is set, then record.
+class FlakyDiscord(FakeDiscord):
+    """Discord double whose sends raise while ``fail`` is set, then record.
 
     Used to prove that a failed delivery is retried on the next poll rather than
     being silently marked as alerted/seen/ended.
@@ -125,38 +123,38 @@ class FlakyTelegram(FakeTelegram):
         super().__init__()
         self.fail = True
 
-    async def notify_listing(self, chat_id: str, listing: Listing) -> None:
+    async def notify_listing(self, channel_id: str, listing: Listing) -> None:
         if self.fail:
-            raise RuntimeError("telegram down")
-        await super().notify_listing(chat_id, listing)
+            raise RuntimeError("discord down")
+        await super().notify_listing(channel_id, listing)
 
     async def notify_ended_listing(
-        self, chat_id: str, listing: Listing, ended_at: str | None = None
+        self, channel_id: str, listing: Listing, ended_at: str | None = None
     ) -> None:
         if self.fail:
-            raise RuntimeError("telegram down")
-        await super().notify_ended_listing(chat_id, listing, ended_at)
+            raise RuntimeError("discord down")
+        await super().notify_ended_listing(channel_id, listing, ended_at)
 
     async def notify_price_drop(
-        self, chat_id: str, listing: Listing, old_price: float, new_price: float, pct: float
+        self, channel_id: str, listing: Listing, old_price: float, new_price: float, pct: float
     ) -> None:
         if self.fail:
-            raise RuntimeError("telegram down")
-        await super().notify_price_drop(chat_id, listing, old_price, new_price, pct)
+            raise RuntimeError("discord down")
+        await super().notify_price_drop(channel_id, listing, old_price, new_price, pct)
 
-    async def notify_deal(self, chat_id: str, item, **kwargs) -> None:
+    async def notify_deal(self, channel_id: str, item, **kwargs) -> None:
         if self.fail:
-            raise RuntimeError("telegram down")
-        await super().notify_deal(chat_id, item, **kwargs)
+            raise RuntimeError("discord down")
+        await super().notify_deal(channel_id, item, **kwargs)
 
 
 def _service_config() -> SimpleNamespace:
     return SimpleNamespace(
         seed_sellers=(),
-        telegram_chat_id="chat-1",
-        telegram_allowed_chat_ids=(),
-        telegram_allowed_usernames=(),
-        telegram_send_photos=True,
+        discord_channel_id="chat-1",
+        discord_allowed_channel_ids=(),
+        discord_allowed_usernames=(),
+        discord_send_images=True,
         notify_existing_on_first_run=False,
         seller_check_delay_seconds=0,
         max_items_per_seller=20,
@@ -246,7 +244,7 @@ def test_check_once_alerts_only_quantity_increases(tmp_path: Path) -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -297,8 +295,8 @@ def test_check_once_alerts_only_quantity_increases(tmp_path: Path) -> None:
         count = asyncio.run(service.check_once())
 
         assert count == 1
-        assert service.telegram.quantity_increases == [("chat-1", "123456789012", 2, 5)]
-        assert service.telegram.ended == []
+        assert service.discord.quantity_increases == [("chat-1", "123456789012", 2, 5)]
+        assert service.discord.ended == []
     finally:
         store.close()
 
@@ -335,7 +333,7 @@ def test_check_once_alerts_new_listing(tmp_path: Path) -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -363,23 +361,23 @@ def test_check_once_alerts_new_listing(tmp_path: Path) -> None:
         count = asyncio.run(service.check_once())
 
         assert count == 1
-        assert service.telegram.listings == [("chat-1", "222222222222")]
-        assert service.telegram.ended == []
+        assert service.discord.listings == [("chat-1", "222222222222")]
+        assert service.discord.ended == []
     finally:
         store.close()
 
 
 def test_no_chat_configured_seeds_silently_without_flooding(tmp_path: Path) -> None:
-    # With no chat configured yet, new listings must be seeded as seen (not held
-    # unseen forever) so that adding a chat later doesn't flood the whole backlog.
+    # With no channel configured yet, new listings must be seeded as seen (not held
+    # unseen forever) so that adding a channel later doesn't flood the whole backlog.
     store = Store(tmp_path / "test.sqlite3")
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
-    service.configured_chats = lambda: []  # no chat yet
+    service.configured_channels = lambda: []  # no channel yet
     try:
         store.add_seller("seller_one")
         store.record_check("seller_one", listing_count=0, new_count=0)  # not a first scan
@@ -390,12 +388,12 @@ def test_no_chat_configured_seeds_silently_without_flooding(tmp_path: Path) -> N
         )
         service.ebay = FakeEbay([backlog])
         count = asyncio.run(service.check_once())
-        assert count == 0  # nothing alerted with no chat
-        assert service.telegram.listings == []
+        assert count == 0  # nothing alerted with no channel
+        assert service.discord.listings == []
         assert store.is_seen("222222222222")  # but seeded so it won't re-fire
 
-        # A chat appears and a genuinely new listing arrives — only it alerts.
-        service.configured_chats = lambda: ["chat-1"]
+        # A channel appears and a genuinely new listing arrives — only it alerts.
+        service.configured_channels = lambda: ["chat-1"]
         fresh = Listing(
             item_id="333333333333", seller="seller_one", title="Brand new",
             price="GBP 12.00", url="https://example.test/itm/333333333333",
@@ -403,7 +401,7 @@ def test_no_chat_configured_seeds_silently_without_flooding(tmp_path: Path) -> N
         service.ebay = FakeEbay([fresh, backlog])
         count = asyncio.run(service.check_once())
         assert count == 1
-        assert service.telegram.listings == [("chat-1", "333333333333")]
+        assert service.discord.listings == [("chat-1", "333333333333")]
     finally:
         store.close()
 
@@ -415,7 +413,7 @@ def test_check_once_skips_ended_detection_when_results_truncated(tmp_path: Path)
     config.max_items_per_seller = 3
     service.config = config
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -450,8 +448,8 @@ def test_check_once_skips_ended_detection_when_results_truncated(tmp_path: Path)
 
         asyncio.run(service.check_once())
 
-        assert service.telegram.ended == []
-        assert service.telegram.listings == [("chat-1", "100000000005")]
+        assert service.discord.ended == []
+        assert service.discord.listings == [("chat-1", "100000000005")]
     finally:
         store.close()
 
@@ -463,7 +461,7 @@ def test_check_once_alerts_ended_when_results_not_truncated(tmp_path: Path) -> N
     config.max_items_per_seller = 10
     service.config = config
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -494,7 +492,7 @@ def test_check_once_alerts_ended_when_results_not_truncated(tmp_path: Path) -> N
         count = asyncio.run(service.check_once())
 
         assert count == 1
-        assert service.telegram.ended == [("chat-1", "100000000002")]
+        assert service.discord.ended == [("chat-1", "100000000002")]
     finally:
         store.close()
 
@@ -530,7 +528,7 @@ def test_check_once_suppresses_ended_alert_when_item_still_active(tmp_path: Path
     config.max_items_per_seller = 10
     service.config = config
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -561,7 +559,7 @@ def test_check_once_suppresses_ended_alert_when_item_still_active(tmp_path: Path
         count = asyncio.run(service.check_once())
 
         assert count == 0
-        assert service.telegram.ended == []
+        assert service.discord.ended == []
     finally:
         store.close()
 
@@ -570,7 +568,7 @@ def _observe_service(store: Store, ebay: FakeEbay) -> EbaySpyService:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.ebay = ebay
     service.stop_event = asyncio.Event()
     return service
@@ -592,7 +590,7 @@ def test_observe_seller_seeds_silently_on_first_run(tmp_path: Path) -> None:
         count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
 
         assert count == 0
-        assert service.telegram.listings == []
+        assert service.discord.listings == []
         assert service.ebay.hydrated == []
         assert store.is_seen("222222222222")
         assert store.observed_seller_has_successful_check("seller_one")
@@ -625,7 +623,7 @@ def test_observe_seller_alerts_and_hydrates_only_new_items(tmp_path: Path) -> No
         count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
 
         assert count == 1
-        assert service.telegram.listings == [("chat-1", "222222222222")]
+        assert service.discord.listings == [("chat-1", "222222222222")]
         assert service.ebay.hydrated == ["222222222222"]
         assert store.is_seen("222222222222")
     finally:
@@ -677,7 +675,7 @@ def test_observe_seller_suppresses_items_below_price_floor(tmp_path: Path) -> No
         count = asyncio.run(service._observe_seller("seller_one", ["chat-1"]))
 
         assert count == 1
-        assert service.telegram.listings == [("chat-1", "222222222222")]
+        assert service.discord.listings == [("chat-1", "222222222222")]
         # The sub-floor item is never hydrated (saves an API call) but is marked
         # seen so it isn't reconsidered every poll.
         assert service.ebay.hydrated == ["222222222222"]
@@ -691,7 +689,7 @@ def test_check_once_suppresses_new_listing_below_price_floor(tmp_path: Path) -> 
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -726,7 +724,7 @@ def test_check_once_suppresses_new_listing_below_price_floor(tmp_path: Path) -> 
         count = asyncio.run(service.check_once())
 
         assert count == 1
-        assert service.telegram.listings == [("chat-1", "222222222222")]
+        assert service.discord.listings == [("chat-1", "222222222222")]
         # Sub-floor item is still recorded so it won't be re-evaluated each poll.
         assert store.is_seen("333333333333")
     finally:
@@ -765,7 +763,7 @@ def _market_service(store: Store, ebay: FakeEbay) -> EbaySpyService:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.ebay = ebay
     service.stop_event = asyncio.Event()
     service._auction_turbo = {}
@@ -793,7 +791,7 @@ def test_check_market_watch_alerts_below_market(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         assert sent == 1
-        assert [item_id for _, item_id, _ in service.telegram.deals] == ["great"]
+        assert [item_id for _, item_id, _ in service.discord.deals] == ["great"]
         row = store.get_market_watch(watch_id)
         assert row["market_price"] == 200  # trimmed median (the 50 outlier dropped)
         assert row["sample_size"] == 6
@@ -812,9 +810,9 @@ def test_market_watcher_survives_one_watch_failing(tmp_path: Path) -> None:
     service = _market_service(store, FakeEbay([]))
     try:
         store.add_market_watch("dyson airblade hu02")
-        service.configured_chats = lambda: ["chat-1"]
+        service.configured_channels = lambda: ["chat-1"]
 
-        async def boom(row, chats):
+        async def boom(row, channels):
             service.stop_event.set()  # let the loop exit cleanly after this tick
             raise RuntimeError("kaboom")
 
@@ -840,7 +838,7 @@ def test_check_market_watch_caps_alerts_per_cycle(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         assert sent == 3  # capped, not all ten in one burst
-        assert len(service.telegram.deals) == 3
+        assert len(service.discord.deals) == 3
     finally:
         store.close()
 
@@ -863,7 +861,7 @@ def test_check_market_watch_prices_each_variant_separately(tmp_path: Path) -> No
 
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
-        alerted = {item_id for _, item_id, _ in service.telegram.deals}
+        alerted = {item_id for _, item_id, _ in service.discord.deals}
         assert alerted == {"deal128", "deal256"}
         assert sent == 2
         # Headline price is the larger/most-populated variant, tagged with it.
@@ -906,7 +904,7 @@ def test_no_bid_auction_alerts_at_relaxed_threshold(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         assert sent == 1
-        assert {item_id for _, item_id, _ in service.telegram.deals} == {"nobid"}
+        assert {item_id for _, item_id, _ in service.discord.deals} == {"nobid"}
     finally:
         store.close()
 
@@ -925,7 +923,7 @@ def test_auction_sniping_two_stage_and_turbo(tmp_path: Path) -> None:
 
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
-        alerted = {item_id for _, item_id, _ in service.telegram.deals}
+        alerted = {item_id for _, item_id, _ in service.discord.deals}
         assert alerted == {"soon", "later"}  # both auctions, no fixed deals at 400
         assert sent == 2
         # The imminent auction flags the watch for turbo polling.
@@ -937,10 +935,10 @@ def test_auction_sniping_two_stage_and_turbo(tmp_path: Path) -> None:
         store.close()
 
 
-def test_chats_for_watch_owner_vs_broadcast(tmp_path: Path) -> None:
+def test_channels_for_watch_owner_vs_broadcast(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     service = _market_service(store, FakeEbay([]))
-    service.config.telegram_allowed_chat_ids = ("admin-1",)
+    service.config.discord_allowed_channel_ids = ("admin-1",)
     try:
         owned = store.add_market_watch("iphone 13", owner_chat_id="user-9")
         seeded = store.add_market_watch("ps5")  # no owner
@@ -950,9 +948,9 @@ def test_chats_for_watch_owner_vs_broadcast(tmp_path: Path) -> None:
         broadcast = ["a", "b"]
 
         # Owned watch -> owner + admins, not the whole broadcast list.
-        assert service._chats_for_watch(owned_row, broadcast) == ["user-9", "admin-1"]
+        assert service._channels_for_watch(owned_row, broadcast) == ["user-9", "admin-1"]
         # Ownerless watch -> broadcast to everyone.
-        assert service._chats_for_watch(seeded_row, broadcast) == broadcast
+        assert service._channels_for_watch(seeded_row, broadcast) == broadcast
     finally:
         store.close()
 
@@ -980,7 +978,7 @@ def test_insights_overrides_price_with_sold_median(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         # Sold pricing suppresses the false deal and keeps the genuine one.
-        assert {item_id for _, item_id, _ in service.telegram.deals} == {"real"}
+        assert {item_id for _, item_id, _ in service.discord.deals} == {"real"}
         assert sent == 1
         row = store.get_market_watch(watch_id)
         assert 360 <= row["market_price"] <= 366  # sold median, not the ~402 live asking
@@ -1002,7 +1000,7 @@ def test_lot_arbitrage_values_per_unit(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         assert sent == 1
-        assert {item_id for _, item_id, _ in service.telegram.deals} == {"lot"}
+        assert {item_id for _, item_id, _ in service.discord.deals} == {"lot"}
     finally:
         store.close()
 
@@ -1018,7 +1016,7 @@ def test_check_market_watch_no_comparables(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
 
         assert sent == 0
-        assert service.telegram.deals == []
+        assert service.discord.deals == []
         assert store.get_market_watch(watch_id)["market_price"] is None
     finally:
         store.close()
@@ -1027,8 +1025,8 @@ def test_check_market_watch_no_comparables(tmp_path: Path) -> None:
 def test_callback_block_learns_exclude_term(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     service = _market_service(store, FakeEbay([]))
-    service.config.telegram_allowed_chat_ids = ()
-    service.config.telegram_allowed_usernames = ()
+    service.config.discord_allowed_channel_ids = ()
+    service.config.discord_allowed_usernames = ()
     try:
         watch_id = store.add_market_watch("dyson airblade hu02")
         # A deal was alerted for a tap that wrongly matched.
@@ -1050,8 +1048,8 @@ def test_callback_block_learns_exclude_term(tmp_path: Path) -> None:
 def test_callback_mute_variant(tmp_path: Path) -> None:
     store = Store(tmp_path / "test.sqlite3")
     service = _market_service(store, FakeEbay([]))
-    service.config.telegram_allowed_chat_ids = ()
-    service.config.telegram_allowed_usernames = ()
+    service.config.discord_allowed_channel_ids = ()
+    service.config.discord_allowed_usernames = ()
     try:
         watch_id = store.add_market_watch("iphone 13")
         store.record_deal_alert(watch_id, "777", 400.0, variant="pro · 256gb", title="iPhone 13 Pro")
@@ -1101,8 +1099,8 @@ def test_new_listing_alert_retried_after_send_failure(tmp_path: Path) -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    telegram = FlakyTelegram()
-    service.telegram = telegram
+    discord = FlakyDiscord()
+    service.discord = discord
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -1127,18 +1125,18 @@ def test_new_listing_alert_retried_after_send_failure(tmp_path: Path) -> None:
         )
         service.ebay = FakeEbay([fresh, existing])
 
-        # Telegram is down: the alert fails and the item must stay unseen so it
+        # Discord is down: the alert fails and the item must stay unseen so it
         # is retried, not silently lost.
         count = asyncio.run(service.check_once())
         assert count == 0
-        assert telegram.listings == []
+        assert discord.listings == []
         assert not store.is_seen("222222222222")
 
-        # Telegram recovers: the next poll re-sends and only now marks it seen.
-        telegram.fail = False
+        # Discord recovers: the next poll re-sends and only now marks it seen.
+        discord.fail = False
         count = asyncio.run(service.check_once())
         assert count == 1
-        assert telegram.listings == [("chat-1", "222222222222")]
+        assert discord.listings == [("chat-1", "222222222222")]
         assert store.is_seen("222222222222")
     finally:
         store.close()
@@ -1151,8 +1149,8 @@ def test_ended_alert_retried_after_send_failure(tmp_path: Path) -> None:
     config.max_items_per_seller = 10
     service.config = config
     service.store = store
-    telegram = FlakyTelegram()
-    service.telegram = telegram
+    discord = FlakyDiscord()
+    service.discord = discord
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -1183,13 +1181,13 @@ def test_ended_alert_retried_after_send_failure(tmp_path: Path) -> None:
         # candidate (not marked ended-notified) for the next poll.
         count = asyncio.run(service.check_once())
         assert count == 0
-        assert telegram.ended == []
+        assert discord.ended == []
 
-        # Telegram recovers: the ended alert fires exactly once on retry.
-        telegram.fail = False
+        # Discord recovers: the ended alert fires exactly once on retry.
+        discord.fail = False
         count = asyncio.run(service.check_once())
         assert count == 1
-        assert telegram.ended == [("chat-1", "100000000002")]
+        assert discord.ended == [("chat-1", "100000000002")]
     finally:
         store.close()
 
@@ -1206,23 +1204,23 @@ def test_market_deal_alert_retried_after_send_failure(tmp_path: Path) -> None:
         _market_item("mkt-d", 250, title),
     ]
     service = _market_service(store, ebay)
-    telegram = FlakyTelegram()
-    service.telegram = telegram
+    discord = FlakyDiscord()
+    service.discord = discord
     try:
         watch_id = store.add_market_watch("dyson airblade hu02")
 
-        # Telegram is down: the deal is not recorded as alerted, so it stays
+        # Discord is down: the deal is not recorded as alerted, so it stays
         # actionable instead of being permanently suppressed.
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
         assert sent == 0
-        assert telegram.deals == []
+        assert discord.deals == []
         assert store.deal_already_alerted(watch_id, "great") is False
 
-        # Telegram recovers: the deal alerts on the next check.
-        telegram.fail = False
+        # Discord recovers: the deal alerts on the next check.
+        discord.fail = False
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
         assert sent == 1
-        assert [item_id for _, item_id, _ in telegram.deals] == ["great"]
+        assert [item_id for _, item_id, _ in discord.deals] == ["great"]
         assert store.deal_already_alerted(watch_id, "great") is True
     finally:
         store.close()
@@ -1241,7 +1239,7 @@ def test_check_once_alerts_price_drop(tmp_path: Path) -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -1256,12 +1254,12 @@ def test_check_once_alerts_price_drop(tmp_path: Path) -> None:
                           price="GBP 80.00", url="https://example.test/itm/111111111111")
         service.ebay = FakeEbay([cheaper])
         assert asyncio.run(service.check_once()) == 1
-        assert service.telegram.price_drops == [("chat-1", "111111111111", 100.0, 80.0)]
+        assert service.discord.price_drops == [("chat-1", "111111111111", 100.0, 80.0)]
 
         # Same low price next poll -> deduped, no re-alert.
         service.ebay = FakeEbay([cheaper])
         assert asyncio.run(service.check_once()) == 0
-        assert len(service.telegram.price_drops) == 1
+        assert len(service.discord.price_drops) == 1
     finally:
         store.close()
 
@@ -1271,7 +1269,7 @@ def test_check_once_records_poll_health(tmp_path: Path) -> None:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
     try:
@@ -1305,7 +1303,7 @@ def test_offer_candidate_alerted_at_offer_stage(tmp_path: Path) -> None:
         sent = asyncio.run(service._check_market_watch(store.get_market_watch(watch_id), ["chat-1"]))
         assert sent == 1
         assert store.get_deal_alert(watch_id, "offer")["stage"] == "offer"
-        assert [item_id for _, item_id, _ in service.telegram.deals] == ["offer"]
+        assert [item_id for _, item_id, _ in service.discord.deals] == ["offer"]
 
         # Disabled -> the same item is not flagged.
         store2 = Store(tmp_path / "t2.sqlite3")
@@ -1355,7 +1353,7 @@ def _command_service(store: Store, ebay: FakeEbay) -> EbaySpyService:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service.ebay = ebay
     service.stop_event = asyncio.Event()
     service._check_lock = asyncio.Lock()
@@ -1426,10 +1424,10 @@ def _heartbeat_service(store: Store) -> EbaySpyService:
     config = _service_config()
     config.heartbeat_enabled = True
     config.heartbeat_interval_seconds = 18000
-    config.telegram_chat_id = "chat-1"
+    config.discord_channel_id = "chat-1"
     service.config = config
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     service._started_at = datetime.now(timezone.utc)
     return service
 
@@ -1441,8 +1439,8 @@ def test_heartbeat_sends_when_quiet(tmp_path: Path) -> None:
     service = _heartbeat_service(store)
     try:
         asyncio.run(service._maybe_send_heartbeat())
-        assert service.telegram.messages, "expected a heartbeat to be sent"
-        assert "Heartbeat" in service.telegram.messages[0][1]
+        assert service.discord.messages, "expected a heartbeat to be sent"
+        assert "Heartbeat" in service.discord.messages[0][1]
         assert store.get_meta("last_heartbeat_at") is not None
     finally:
         store.close()
@@ -1455,7 +1453,7 @@ def test_heartbeat_skips_when_recently_active(tmp_path: Path) -> None:
     try:
         store.set_meta("last_alert_at", datetime.now(timezone.utc).isoformat())
         asyncio.run(service._maybe_send_heartbeat())
-        assert not service.telegram.messages
+        assert not service.discord.messages
         assert store.get_meta("last_heartbeat_at") is None
     finally:
         store.close()
@@ -1467,7 +1465,7 @@ def test_heartbeat_disabled_is_silent(tmp_path: Path) -> None:
     service.config.heartbeat_enabled = False
     try:
         asyncio.run(service._maybe_send_heartbeat())
-        assert not service.telegram.messages
+        assert not service.discord.messages
     finally:
         store.close()
 
@@ -1476,14 +1474,15 @@ def _management_service(store: Store) -> EbaySpyService:
     service = object.__new__(EbaySpyService)
     service.config = _service_config()
     service.store = store
-    service.telegram = FakeTelegram()
+    service.discord = FakeDiscord()
     return service
 
 
-def _callback_datas(markup: dict | None) -> set[str]:
-    if not markup:
+def _custom_ids(rows: list | None) -> set[str]:
+    """The custom_ids of every button in a list of button rows."""
+    if not rows:
         return set()
-    return {b["callback_data"] for row in markup["inline_keyboard"] for b in row}
+    return {button.custom_id for row in rows for button in row}
 
 
 def test_list_command_sends_one_remove_button_per_seller(tmp_path: Path) -> None:
@@ -1495,9 +1494,9 @@ def test_list_command_sends_one_remove_button_per_seller(tmp_path: Path) -> None
         reply = asyncio.run(service.handle_command("chat-1", "user", "/list", ""))
         # Sent directly with buttons, so the plain-text reply path stays empty.
         assert reply == ""
-        assert len(service.telegram.messages) == 1
-        _chat, _text, markup = service.telegram.messages[0]
-        assert _callback_datas(markup) == {"rs:lithosale", "rs:chfle-6052"}
+        assert len(service.discord.messages) == 1
+        _chat, _text, markup = service.discord.messages[0]
+        assert _custom_ids(markup) == {"rs:lithosale", "rs:chfle-6052"}
     finally:
         store.close()
 
@@ -1512,10 +1511,10 @@ def test_watches_and_observing_commands_send_remove_buttons(tmp_path: Path) -> N
         asyncio.run(service.handle_command("chat-1", "user", "/watches", ""))
         asyncio.run(service.handle_command("chat-1", "user", "/observing", ""))
 
-        watches_markup = service.telegram.messages[0][2]
-        observing_markup = service.telegram.messages[1][2]
-        assert _callback_datas(watches_markup) == {f"uw:{watch_id}"}
-        assert _callback_datas(observing_markup) == {"ro:lithosale"}
+        watches_markup = service.discord.messages[0][2]
+        observing_markup = service.discord.messages[1][2]
+        assert _custom_ids(watches_markup) == {f"uw:{watch_id}"}
+        assert _custom_ids(observing_markup) == {"ro:lithosale"}
     finally:
         store.close()
 
@@ -1532,10 +1531,10 @@ def test_remove_button_tap_removes_seller_and_refreshes_in_place(tmp_path: Path)
         assert "Removed lithosale" in toast
         assert [r["username"] for r in store.list_seller_rows()] == ["chfle-6052"]
         # The message is edited in place to drop the removed row's button.
-        assert service.telegram.edits, "expected the list to refresh after removal"
-        _chat, message_id, _text, markup = service.telegram.edits[-1]
+        assert service.discord.edits, "expected the list to refresh after removal"
+        _chat, message_id, _text, markup = service.discord.edits[-1]
         assert message_id == 42
-        assert _callback_datas(markup) == {"rs:chfle-6052"}
+        assert _custom_ids(markup) == {"rs:chfle-6052"}
     finally:
         store.close()
 
@@ -1547,8 +1546,8 @@ def test_last_removal_clears_the_keyboard(tmp_path: Path) -> None:
         store.add_seller("lithosale")
         asyncio.run(service.handle_callback("chat-1", "user", "rs:lithosale", 1))
         assert store.list_seller_rows() == []
-        _chat, _mid, _text, markup = service.telegram.edits[-1]
-        assert markup == {"inline_keyboard": []}  # buttons cleared when empty
+        _chat, _mid, _text, markup = service.discord.edits[-1]
+        assert markup == []  # buttons cleared when empty
     finally:
         store.close()
 
@@ -1575,11 +1574,21 @@ def test_unwatch_and_unobserve_button_taps_remove_rows(tmp_path: Path) -> None:
         store.close()
 
 
-def test_remove_button_callback_data_skipped_when_too_long() -> None:
-    # An eBay username long enough to push callback_data past 64 bytes gets no
-    # button (it would make Telegram reject the whole message); text still lists it.
-    assert EbaySpyService._remove_button("x", "rs:" + "a" * 62) is None
-    assert EbaySpyService._remove_button("x", "rs:lithosale") is not None
+def test_remove_button_custom_id_skipped_when_too_long() -> None:
+    # An eBay username long enough to push the custom_id past Discord's 100-char
+    # cap gets no button (it would make Discord reject the whole message); the
+    # text still lists it.
+    assert EbaySpyService._remove_button("x", "rs:" + "a" * 98) is None
+    assert EbaySpyService._remove_button("x", "rs:" + "a" * 97) is not None
+    assert EbaySpyService._remove_button("x", "rs:lithosale").custom_id == "rs:lithosale"
+
+
+def test_table_buttons_pack_five_per_row_and_cap_at_twenty_five() -> None:
+    buttons = [EbaySpyService._remove_button(f"🗑 s{i}", f"rs:s{i}") for i in range(30)]
+    rows = EbaySpyService._table_buttons(buttons)
+    assert len(rows) == 5 and all(len(row) == 5 for row in rows)
+    assert _custom_ids(rows) == {f"rs:s{i}" for i in range(25)}
+    assert EbaySpyService._table_buttons([]) == []
 
 
 def _vision_service(**overrides) -> EbaySpyService:

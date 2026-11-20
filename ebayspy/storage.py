@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -8,8 +9,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .models import Listing
 
+log = logging.getLogger(__name__)
+
 EBAY_USERNAME_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$"
-TELEGRAM_USERNAME_RE = r"^[A-Za-z][A-Za-z0-9_]{4,31}$"
+# Discord usernames (post-2023 system): 2-32 chars of a-z 0-9 _ . — matched
+# after lower-casing, so mixed-case legacy names still validate.
+DISCORD_USERNAME_RE = r"^[a-z0-9_.]{2,32}$"
 
 
 class Store:
@@ -75,8 +80,8 @@ class Store:
                 last_drop_alert_price text
             );
 
-            create table if not exists telegram_chats (
-                chat_id text primary key,
+            create table if not exists discord_channels (
+                channel_id text primary key,
                 username text,
                 created_at text not null default current_timestamp
             );
@@ -202,6 +207,7 @@ class Store:
             """
         )
         self.conn.commit()
+        self._migrate_from_telegram()
         self._ensure_listing_columns()
 
     def _ensure_listing_columns(self) -> None:
@@ -233,11 +239,8 @@ class Store:
             self.conn.execute(
                 "alter table seller_checks add column last_ended_count integer not null default 0"
             )
-        chat_columns = self._table_columns("telegram_chats")
-        if "username" not in chat_columns:
-            self.conn.execute("alter table telegram_chats add column username text")
         # Per-seller minimum price floor: suppress alerts for items below it so a
-        # spammy seller's cheap junk never reaches Telegram. NULL means "any price".
+        # spammy seller's cheap junk never reaches Discord. NULL means "any price".
         if "min_price" not in self._table_columns("sellers"):
             self.conn.execute("alter table sellers add column min_price real")
         if "min_price" not in self._table_columns("observed_sellers"):
@@ -277,6 +280,40 @@ class Store:
     def _table_columns(self, table: str) -> set[str]:
         rows = self.conn.execute(f"pragma table_info({table})").fetchall()
         return {row["name"] for row in rows}
+
+    def _table_exists(self, table: str) -> bool:
+        row = self.conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+        return row is not None
+
+    def _migrate_from_telegram(self) -> None:
+        """One-shot clean-up when a database created by the Telegram-era bot is
+        first opened by the Discord bot.
+
+        Telegram chat ids and usernames mean nothing to Discord: a watch owned
+        by a stale Telegram chat would route its deals to nobody, and a Discord
+        user who happens to share a Telegram invitee's name would inherit the
+        invite. Owners are cleared (those watches now broadcast to every
+        configured channel) and dynamic invites reset; the old ``telegram_chats``
+        table is left in place, unused.
+        """
+        if not self._table_exists("telegram_chats") or self.get_meta("discord_migrated_at"):
+            return
+        owners = self.conn.execute(
+            "select count(*) from market_watches where owner_chat_id is not null"
+        ).fetchone()[0]
+        invites = len(self.list_allowed_usernames())
+        self.conn.execute("update market_watches set owner_chat_id = null")
+        self.conn.execute("delete from metadata where key = 'allowed_usernames'")
+        self.set_meta("discord_migrated_at", datetime.now(timezone.utc).isoformat())
+        log.warning(
+            "Migrated the database from Telegram to Discord: %s owned watch(es) now "
+            "broadcast to every configured channel and %s Telegram invite(s) were "
+            "cleared. Set DISCORD_CHANNEL_ID / DISCORD_ALLOWED_USERNAMES in .env.",
+            owners,
+            invites,
+        )
 
     def record_check(
         self,
@@ -541,7 +578,7 @@ class Store:
         category_id: str | None = None,
         include_auctions: bool | None = None,
         markets: str | None = None,
-        owner_chat_id: str | None = None,
+        owner_chat_id: str | None = None,  # the Discord channel id that added it
         include_lots: bool | None = None,
     ) -> int | None:
         query = normalize_market_query(query)
@@ -1004,30 +1041,34 @@ class Store:
         ).fetchall()
         return [row["item_id"] for row in rows]
 
-    def add_chat(self, chat_id: str, username: str | None = None) -> None:
-        normalized_username = normalize_telegram_username(username)
+    def add_channel(self, channel_id: str, username: str | None = None) -> None:
+        """Remember a Discord channel (server channel or DM) that used the bot,
+        so alerts go there too; ``username`` is the last user who commanded it."""
+        normalized_username = normalize_discord_username(username)
         self.conn.execute(
             """
-            insert into telegram_chats(chat_id, username) values (?, ?)
-            on conflict(chat_id) do update set
-                username = coalesce(excluded.username, telegram_chats.username)
+            insert into discord_channels(channel_id, username) values (?, ?)
+            on conflict(channel_id) do update set
+                username = coalesce(excluded.username, discord_channels.username)
             """,
-            (str(chat_id), normalized_username),
+            (str(channel_id), normalized_username),
         )
         self.conn.commit()
 
-    def list_chats(self) -> list[str]:
-        rows = self.conn.execute("select chat_id from telegram_chats order by created_at").fetchall()
-        return [row["chat_id"] for row in rows]
+    def list_channels(self) -> list[str]:
+        rows = self.conn.execute(
+            "select channel_id from discord_channels order by created_at"
+        ).fetchall()
+        return [row["channel_id"] for row in rows]
 
-    def list_chat_rows(self) -> list[sqlite3.Row]:
+    def list_channel_rows(self) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "select chat_id, username from telegram_chats order by created_at"
+            "select channel_id, username from discord_channels order by created_at"
         ).fetchall()
 
     def add_allowed_username(self, username: str) -> bool:
-        username = normalize_telegram_username(username)
-        if not is_valid_telegram_username(username):
+        username = normalize_discord_username(username)
+        if not is_valid_discord_username(username):
             return False
         usernames = set(self.list_allowed_usernames())
         if username in usernames:
@@ -1037,7 +1078,7 @@ class Store:
         return True
 
     def remove_allowed_username(self, username: str) -> bool:
-        username = normalize_telegram_username(username)
+        username = normalize_discord_username(username)
         usernames = set(self.list_allowed_usernames())
         if username not in usernames:
             return False
@@ -1051,7 +1092,7 @@ class Store:
             {
                 normalized
                 for part in value.split(",")
-                if (normalized := normalize_telegram_username(part))
+                if (normalized := normalize_discord_username(part))
             }
         )
 
@@ -1563,7 +1604,7 @@ def format_interval(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def normalize_telegram_username(username: str | None) -> str:
+def normalize_discord_username(username: str | None) -> str:
     return (username or "").strip().removeprefix("@").lower()
 
 
@@ -1589,10 +1630,10 @@ def is_valid_ebay_username(username: str) -> bool:
     return re.fullmatch(EBAY_USERNAME_RE, username) is not None
 
 
-def is_valid_telegram_username(username: str) -> bool:
+def is_valid_discord_username(username: str) -> bool:
     import re
 
-    return re.fullmatch(TELEGRAM_USERNAME_RE, username) is not None
+    return re.fullmatch(DISCORD_USERNAME_RE, username) is not None
 
 
 def _parse_quantity(value: str | None) -> int | None:

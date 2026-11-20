@@ -2,7 +2,7 @@
 #
 # Install ebayspy as an always-on macOS LaunchAgent.
 # - Builds an isolated .venv and installs the package
-# - Validates .env (refuses to start without a Telegram token, to avoid a crash loop)
+# - Validates .env (refuses to start without a Discord bot token, to avoid a crash loop)
 # - Writes ~/Library/LaunchAgents/com.ebayspy.tracker.plist
 # - Starts it now and on every login; restarts it automatically if it crashes
 #
@@ -41,16 +41,19 @@ fi
 
 read_env() { grep -E "^$1=" "$PROJECT_DIR/.env" | head -n1 | cut -d= -f2- | tr -d '[:space:]'; }
 
-token="$(read_env TELEGRAM_BOT_TOKEN || true)"
+token="$(read_env DISCORD_BOT_TOKEN || true)"
 if [ -z "$token" ]; then
   cat <<'EOF'
 
-ERROR: TELEGRAM_BOT_TOKEN is empty in .env.
+ERROR: DISCORD_BOT_TOKEN is empty in .env.
 
-  1. In Telegram, message @BotFather and send: /newbot
-  2. Follow the prompts; copy the token it returns (like 123456789:AA...).
-  3. Edit .env and set:  TELEGRAM_BOT_TOKEN=123456789:AA...
-  4. Re-run this script.
+  1. Go to https://discord.com/developers/applications → New Application.
+  2. Bot tab → Reset Token → copy the token.
+  3. Edit .env and set:  DISCORD_BOT_TOKEN=<that token>
+  4. OAuth2 → URL Generator: scopes "bot" + "applications.commands"; bot permissions
+     "Send Messages", "Embed Links", "Read Message History". Open the URL to invite
+     the bot to your server (or just DM the bot after inviting it anywhere).
+  5. Re-run this script.
 
 Not starting the service yet (it would crash-loop without a token).
 EOF
@@ -126,5 +129,5 @@ Done. ebayspy is running and will start automatically every time you log in.
   Errors:     tail -f "$LOG_DIR/ebayspy.err.log"
   Stop/remove: ./scripts/uninstall-launchd.sh
 
-Next: open Telegram, send /start to your bot, then /add <sellername>.
+Next: in Discord, run /help in the channel (or DM) that should get alerts, then /add <sellername>.
 EOF

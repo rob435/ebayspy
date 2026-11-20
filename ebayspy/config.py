@@ -98,11 +98,18 @@ def _username_env(name: str) -> list[str]:
 
 @dataclass(frozen=True)
 class Config:
-    telegram_bot_token: str
-    telegram_chat_id: str | None
-    telegram_allowed_chat_ids: tuple[str, ...]
-    telegram_allowed_usernames: tuple[str, ...]
-    telegram_send_photos: bool
+    discord_bot_token: str
+    # Default alert destination (a channel or DM channel id). Channels where
+    # someone runs /help are recorded and alerted too.
+    discord_channel_id: str | None
+    # Allowlists. Channel ids: anyone posting there may command the bot (a
+    # private server channel). Usernames: those users may command it from
+    # anywhere and count as admins for /invite.
+    discord_allowed_channel_ids: tuple[str, ...]
+    discord_allowed_usernames: tuple[str, ...]
+    discord_send_images: bool
+    # Privileged gateway intent; only needed for !text commands in server channels.
+    discord_message_content_intent: bool
     ebay_app_id: str | None
     ebay_client_secret: str | None
     ebay_global_id: str
@@ -190,16 +197,17 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         load_dotenv()
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
+        token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+        channel_id = os.getenv("DISCORD_CHANNEL_ID", "").strip() or None
         app_id = os.getenv("EBAY_APP_ID", "").strip() or None
         client_secret = os.getenv("EBAY_CLIENT_SECRET", "").strip() or None
         return cls(
-            telegram_bot_token=token,
-            telegram_chat_id=chat_id,
-            telegram_allowed_chat_ids=tuple(_csv_env("TELEGRAM_ALLOWED_CHAT_IDS")),
-            telegram_allowed_usernames=tuple(_username_env("TELEGRAM_ALLOWED_USERNAMES")),
-            telegram_send_photos=_bool_env("TELEGRAM_SEND_PHOTOS", True),
+            discord_bot_token=token,
+            discord_channel_id=channel_id,
+            discord_allowed_channel_ids=tuple(_csv_env("DISCORD_ALLOWED_CHANNEL_IDS")),
+            discord_allowed_usernames=tuple(_username_env("DISCORD_ALLOWED_USERNAMES")),
+            discord_send_images=_bool_env("DISCORD_SEND_IMAGES", True),
+            discord_message_content_intent=_bool_env("DISCORD_MESSAGE_CONTENT_INTENT", False),
             ebay_app_id=app_id,
             ebay_client_secret=client_secret,
             ebay_global_id=os.getenv("EBAY_GLOBAL_ID", "EBAY-US").strip() or "EBAY-US",
@@ -278,9 +286,13 @@ class Config:
             wake_arm_count=max(1, _int_env("EBAYSPY_WAKE_ARM_COUNT", 2)),
         )
 
-    def require_telegram(self) -> None:
-        if not self.telegram_bot_token:
-            raise SystemExit("TELEGRAM_BOT_TOKEN is required. Add it to .env or the environment.")
+    def require_discord(self) -> None:
+        if not self.discord_bot_token:
+            raise SystemExit(
+                "DISCORD_BOT_TOKEN is required. Create an application at "
+                "https://discord.com/developers/applications, add a Bot, copy its token "
+                "into .env, and invite it to your server (see README)."
+            )
 
     def require_ebay(self) -> None:
         if not self.ebay_app_id or not self.ebay_client_secret:

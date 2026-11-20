@@ -14,11 +14,11 @@ from ebayspy.storage import (
     format_seller_rows,
     format_status_rows,
     is_valid_ebay_username,
-    is_valid_telegram_username,
+    is_valid_discord_username,
     looks_like_floor,
     normalize_ebay_username,
     normalize_market_query,
-    normalize_telegram_username,
+    normalize_discord_username,
     parse_interval,
     parse_price_floor,
     passes_min_price,
@@ -320,9 +320,11 @@ def test_store_tracks_allowed_usernames(tmp_path: Path) -> None:
         assert store.remove_allowed_username("@ALICE")
         assert not store.remove_allowed_username("missing")
         assert store.list_allowed_usernames() == ["bobby"]
-        assert normalize_telegram_username("@MixedCase") == "mixedcase"
-        assert is_valid_telegram_username("valid_user")
-        assert not is_valid_telegram_username("bad-name")
+        assert normalize_discord_username("@MixedCase") == "mixedcase"
+        assert is_valid_discord_username("valid_user")
+        assert is_valid_discord_username("rob.435")
+        assert not is_valid_discord_username("bad-name")
+        assert not is_valid_discord_username("x")  # Discord names are 2-32 chars
     finally:
         store.close()
 

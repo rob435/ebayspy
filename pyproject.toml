@@ -5,9 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ebayspy"
 version = "0.1.0"
-description = "Track eBay sellers and send Telegram alerts for newly listed items."
+description = "Track eBay sellers and send Discord alerts for newly listed items and deals."
 requires-python = ">=3.11"
 dependencies = [
+    "discord.py>=2.4",
     "httpx>=0.27.2",
     "python-dotenv>=1.0.1",
     "rapidfuzz>=3.0",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import signal
 from datetime import datetime, timezone
@@ -49,23 +48,26 @@ from .storage import (
     format_seller_rows,
     format_status_rows,
     is_valid_ebay_username,
-    is_valid_telegram_username,
+    is_valid_discord_username,
     looks_like_floor,
     normalize_ebay_username,
     normalize_market_query,
-    normalize_telegram_username,
+    normalize_discord_username,
     parse_interval,
     parse_price_floor,
     passes_min_price,
 )
-from .telegram import TelegramBot
+from .discord_bot import Button, ButtonRows, DiscordBot
 
 log = logging.getLogger(__name__)
 
-# A tappable list (/watches, /list, /observing) renders one 🗑 remove button per
-# row. Cap how many buttons ride along so a huge list can't blow past Telegram's
-# inline-keyboard limits; the message text still lists every entry.
-_MAX_TABLE_BUTTONS = 50
+# A clickable list (/watches, /list, /observing) renders one 🗑 remove button per
+# row. Discord allows at most 5 rows × 5 buttons per message, so a longer list
+# gets buttons for its first 25 entries; the message text still lists them all.
+_MAX_TABLE_BUTTONS = 25
+_BUTTONS_PER_ROW = 5
+# Discord caps a button's custom_id at 100 characters.
+_CUSTOM_ID_LIMIT = 100
 
 
 class _Deal(NamedTuple):
@@ -86,7 +88,7 @@ class _Deal(NamedTuple):
 
 class EbaySpyService:
     def __init__(self, config: Config) -> None:
-        config.require_telegram()
+        config.require_discord()
         config.require_ebay()
         self.config = config
         self.store = Store(config.sqlite_path)
@@ -98,11 +100,11 @@ class EbaySpyService:
             max_items=config.max_items_per_seller,
             detail_concurrency=config.detail_concurrency,
         )
-        self.telegram = TelegramBot(
-            config.telegram_bot_token,
-            config.http_timeout_seconds,
-            config.ebay_global_id,
-            config.telegram_send_photos,
+        self.discord = DiscordBot(
+            config.discord_bot_token,
+            ebay_global_id=config.ebay_global_id,
+            send_images=config.discord_send_images,
+            message_content_intent=config.discord_message_content_intent,
         )
         self.stop_event = asyncio.Event()
         self._check_lock = asyncio.Lock()
@@ -118,7 +120,7 @@ class EbaySpyService:
             vision.disable()
 
     async def close(self) -> None:
-        await self.telegram.close()
+        await self.discord.close()
         await self.ebay.close()
         self.store.close()
 
@@ -135,34 +137,34 @@ class EbaySpyService:
             if not self.store.has_market_watch(query):
                 self.store.add_market_watch(query)
 
-    def configured_chats(self) -> list[str]:
-        chats = []
-        if self.config.telegram_chat_id:
-            chats.append(self.config.telegram_chat_id)
-        for row in self.store.list_chat_rows():
-            chat_id = str(row["chat_id"])
+    def configured_channels(self) -> list[str]:
+        channels = []
+        if self.config.discord_channel_id:
+            channels.append(self.config.discord_channel_id)
+        for row in self.store.list_channel_rows():
+            channel_id = str(row["channel_id"])
             username = row["username"]
-            if chat_id not in chats and self.is_authorized_chat(chat_id, username):
-                chats.append(chat_id)
-        return chats
+            if channel_id not in channels and self.is_authorized_channel(channel_id, username):
+                channels.append(channel_id)
+        return channels
 
-    def is_authorized_chat(self, chat_id: str, username: str | None) -> bool:
+    def is_authorized_channel(self, channel_id: str, username: str | None) -> bool:
         allowed_usernames = self.allowed_usernames()
-        if not self.config.telegram_allowed_chat_ids and not allowed_usernames:
+        if not self.config.discord_allowed_channel_ids and not allowed_usernames:
             return True
-        if chat_id in self.config.telegram_allowed_chat_ids:
+        if channel_id in self.config.discord_allowed_channel_ids:
             return True
-        if normalize_telegram_username(username) in allowed_usernames:
+        if normalize_discord_username(username) in allowed_usernames:
             return True
         return False
 
-    def is_admin_chat(self, chat_id: str, username: str | None) -> bool:
-        if chat_id in self.config.telegram_allowed_chat_ids:
+    def is_admin_channel(self, channel_id: str, username: str | None) -> bool:
+        if channel_id in self.config.discord_allowed_channel_ids:
             return True
-        return normalize_telegram_username(username) in self.config.telegram_allowed_usernames
+        return normalize_discord_username(username) in self.config.discord_allowed_usernames
 
     def allowed_usernames(self) -> set[str]:
-        return set(self.config.telegram_allowed_usernames) | set(self.store.list_allowed_usernames())
+        return set(self.config.discord_allowed_usernames) | set(self.store.list_allowed_usernames())
 
     async def run_forever(self) -> None:
         self.seed_config_sellers()
@@ -182,7 +184,7 @@ class EbaySpyService:
             except NotImplementedError:
                 pass
         command_task = asyncio.create_task(
-            self.telegram.poll_commands(self.handle_command, self.handle_callback)
+            self.discord.run(self.handle_command, self.handle_callback)
         )
         observe_task = asyncio.create_task(self.run_observers())
         market_task = asyncio.create_task(self.run_market_watchers())
@@ -254,7 +256,7 @@ class EbaySpyService:
             # recent liveness, or a real stall would stay silent.
             if 0 <= elapsed < interval:
                 return  # recent activity already proves liveness
-        await self._notify_text(self.configured_chats(), "💓 Heartbeat\n" + self.health_text())
+        await self._notify_text(self.configured_channels(), "💓 Heartbeat\n" + self.health_text())
         self.store.set_meta("last_heartbeat_at", now.isoformat())
 
     async def _check_all_sellers(self) -> int:
@@ -264,9 +266,12 @@ class EbaySpyService:
             log.info("No sellers configured")
             return 0
 
-        chats = self.configured_chats()
-        if not chats:
-            log.warning("No Telegram chats configured yet. Send /start to the bot.")
+        channels = self.configured_channels()
+        if not channels:
+            log.warning(
+                "No Discord channels configured yet. Set DISCORD_CHANNEL_ID in .env, or run "
+                "/help in a channel (or DM) the bot can see."
+            )
 
         total_alert_count = 0
         for seller_index, seller in enumerate(sellers):
@@ -289,7 +294,7 @@ class EbaySpyService:
                 self.store.record_check(seller, listing_count=0, new_count=0, error=str(exc))
                 continue
 
-            current_seller = await self._detect_username_change(seller, listings, chats)
+            current_seller = await self._detect_username_change(seller, listings, channels)
             if current_seller:
                 seller = current_seller
 
@@ -304,17 +309,17 @@ class EbaySpyService:
                 if self.store.is_seen(listing.item_id):
                     continue
                 notified = False
-                if notify_existing and chats and passes_min_price(listing.price, min_price):
-                    sent = await self._notify_chats(chats, listing)
+                if notify_existing and channels and passes_min_price(listing.price, min_price):
+                    sent = await self._notify_channels(channels, listing)
                     if not sent:
-                        # Every chat send failed (e.g. Telegram outage); leave the
+                        # Every channel send failed (e.g. Discord outage); leave the
                         # item unseen so the next poll retries instead of silently
                         # dropping a genuinely new listing.
                         continue
                     seller_new_count += 1
                     total_alert_count += 1
                     notified = True
-                # With no chat configured yet, seed silently so a chat added later
+                # With no channel configured yet, seed silently so one added later
                 # starts fresh rather than being flooded with the whole backlog.
                 self.store.mark_seen(listing, notified=notified)
 
@@ -324,8 +329,8 @@ class EbaySpyService:
                 ):
                     if not passes_min_price(listing.price, min_price):
                         continue
-                    sent = await self._notify_quantity_increase_chats(
-                        chats, listing, previous_quantity, current_quantity
+                    sent = await self._notify_quantity_increase_channels(
+                        channels, listing, previous_quantity, current_quantity
                     )
                     if sent:
                         total_alert_count += 1
@@ -340,8 +345,8 @@ class EbaySpyService:
                     # below the threshold is still junk we don't want to hear about.
                     if min_price and new_price < min_price:
                         continue
-                    sent = await self._notify_price_drop_chats(
-                        chats, listing, old_price, new_price, pct
+                    sent = await self._notify_price_drop_channels(
+                        channels, listing, old_price, new_price, pct
                     )
                     if sent:
                         self.store.mark_price_drop_alerted(listing.item_id, new_price)
@@ -370,8 +375,8 @@ class EbaySpyService:
                                 seller,
                             )
                             continue
-                        sent = await self._notify_ended_chats(
-                            chats, listing, ended_at or last_seen_at
+                        sent = await self._notify_ended_channels(
+                            channels, listing, ended_at or last_seen_at
                         )
                         if sent:
                             seller_ended_count += 1
@@ -420,13 +425,13 @@ class EbaySpyService:
             for username in [key for key in next_due if key not in current]:
                 del next_due[username]
             if current:
-                chats = self.configured_chats()
+                channels = self.configured_channels()
                 for username, row in current.items():
                     if self.stop_event.is_set():
                         break
                     due_at = next_due.get(username, now)
                     if loop.time() >= due_at:
-                        await self._observe_seller(username, chats)
+                        await self._observe_seller(username, channels)
                         next_due[username] = loop.time() + self._observe_interval_for(row)
                     else:
                         next_due[username] = due_at
@@ -442,13 +447,13 @@ class EbaySpyService:
 
     @staticmethod
     def _observe_sleep_seconds(next_due: dict[str, float], now: float) -> float:
-        # Cap the wait so sellers added or retuned from Telegram are picked up promptly.
+        # Cap the wait so sellers added or retuned from Discord are picked up promptly.
         tick = 10.0
         if not next_due:
             return tick
         return max(1.0, min(tick, min(next_due.values()) - now))
 
-    async def _observe_seller(self, seller: str, chats: list[str]) -> int:
+    async def _observe_seller(self, seller: str, channels: list[str]) -> int:
         try:
             listings = await self.ebay.seller_listings(seller, hydrate=False)
         except Exception as exc:
@@ -476,7 +481,7 @@ class EbaySpyService:
                 listing for listing in new_listings if passes_min_price(listing.price, min_price)
             ]
             for listing in await self.ebay.hydrate_listings(to_alert):
-                sent = await self._notify_chats(chats, listing)
+                sent = await self._notify_channels(channels, listing)
                 self.store.mark_seen(listing, notified=sent)
                 if sent:
                     sent_count += 1
@@ -512,13 +517,13 @@ class EbaySpyService:
             for watch_id in [key for key in next_due if key not in current]:
                 del next_due[watch_id]
             if current:
-                broadcast = self.configured_chats()
+                broadcast = self.configured_channels()
                 for watch_id, row in current.items():
                     if self.stop_event.is_set():
                         break
                     due_at = next_due.get(watch_id, loop.time())
                     if loop.time() >= due_at:
-                        watch_chats = self._chats_for_watch(row, broadcast)
+                        watch_chats = self._channels_for_watch(row, broadcast)
                         if watch_chats:
                             # Isolate each watch: an unexpected failure in one must
                             # not kill the whole market-watcher task (it is never
@@ -544,17 +549,18 @@ class EbaySpyService:
         interval = row["interval_seconds"] or self.config.market_interval_seconds
         return max(self.config.market_min_interval_seconds, interval)
 
-    def _chats_for_watch(self, row, broadcast: list[str]) -> list[str]:
-        """A watch added by a specific user alerts that user plus configured
-        admins; one with no owner (env/CLI seeded) broadcasts to everyone."""
+    def _channels_for_watch(self, row, broadcast: list[str]) -> list[str]:
+        """A watch added from a specific channel alerts that channel plus the
+        allowlisted admin channels; one with no owner (env/CLI seeded, or
+        migrated from Telegram) broadcasts to every configured channel."""
         owner = row["owner_chat_id"]
         if not owner:
             return broadcast
-        chats = [owner]
-        for admin in self.config.telegram_allowed_chat_ids:
-            if admin not in chats:
-                chats.append(admin)
-        return chats
+        channels = [owner]
+        for admin in self.config.discord_allowed_channel_ids:
+            if admin not in channels:
+                channels.append(admin)
+        return channels
 
     def _home_marketplace(self) -> str:
         return self.config.ebay_global_id.upper().replace("-", "_")
@@ -562,7 +568,7 @@ class EbaySpyService:
     def _home_country(self) -> str:
         return self._home_marketplace().replace("EBAY_", "")
 
-    async def _maybe_check_arbitrage(self, row, chats: list[str], now: float) -> None:
+    async def _maybe_check_arbitrage(self, row, channels: list[str], now: float) -> None:
         """Run the cross-marketplace check on its own slower cadence (it costs one
         search per marketplace), only for watches that opted in."""
         if not (row["markets"] or "").strip():
@@ -570,9 +576,9 @@ class EbaySpyService:
         if now < self._arbitrage_due.get(row["id"], 0.0):
             return
         self._arbitrage_due[row["id"]] = now + self.config.market_arbitrage_interval_seconds
-        await self._check_arbitrage(row, chats)
+        await self._check_arbitrage(row, channels)
 
-    async def _check_arbitrage(self, row, chats: list[str]) -> None:
+    async def _check_arbitrage(self, row, channels: list[str]) -> None:
         """Compare the same item across marketplaces and flag a buy-low/sell-high gap."""
         extra = [m.strip().upper() for m in (row["markets"] or "").split(",") if m.strip()]
         home = self._home_marketplace()
@@ -619,11 +625,11 @@ class EbaySpyService:
             MARKETPLACE_CURRENCY.get(home, "USD"),
         )
         if result:
-            for chat_id in chats:
+            for channel_id in channels:
                 try:
-                    await self.telegram.notify_arbitrage(chat_id, row["query"], result)
+                    await self.discord.notify_arbitrage(channel_id, row["query"], result)
                 except Exception:
-                    log.exception("Failed sending arbitrage alert to %s", chat_id)
+                    log.exception("Failed sending arbitrage alert to %s", channel_id)
 
     def _watch_exclude_terms(self, row) -> list[str]:
         raw = row["exclude_terms"] or ""
@@ -783,7 +789,7 @@ class EbaySpyService:
         return f"{arrow} Market {pct:+.0f}% vs 7d ago"
 
     async def _finish_market_check(
-        self, row, chats: list[str], *, deal_count: int, error: str | None = None,
+        self, row, channels: list[str], *, deal_count: int, error: str | None = None,
         empty: bool = False,
     ) -> None:
         self.store.record_market_check(
@@ -792,7 +798,7 @@ class EbaySpyService:
         problem = self.store.check_market_health(row["id"], self.config.market_health_threshold)
         if problem:
             await self._notify_text(
-                chats, f"⚠️ Market watch #{row['id']} “{row['query']}” {problem}"
+                channels, f"⚠️ Market watch #{row['id']} “{row['query']}” {problem}"
             )
 
     async def _fetch_sold_prices(self, row, dimensions, labels: set[str]):
@@ -959,7 +965,7 @@ class EbaySpyService:
         self.store.update_market_price(watch_id, price, len(items), len(comparable), variant)
         return price
 
-    async def _check_market_watch(self, row, chats: list[str]) -> int:
+    async def _check_market_watch(self, row, channels: list[str]) -> int:
         watch_id = row["id"]
         query = row["query"]
         discount = (
@@ -975,7 +981,7 @@ class EbaySpyService:
             items, comparable, clusters, dimensions, auctions = await self._sample_market(row)
         except Exception as exc:
             log.exception("Failed pricing market watch %s (%s)", watch_id, query)
-            await self._finish_market_check(row, chats, deal_count=0, error=str(exc))
+            await self._finish_market_check(row, channels, deal_count=0, error=str(exc))
             return 0
 
         # Price each variant against its own kind. A cluster must clear the
@@ -1012,7 +1018,7 @@ class EbaySpyService:
                     watch_id, priced[dominant], len(items), len(comparable), dominant or None
                 )
         if not priced:
-            await self._finish_market_check(row, chats, deal_count=0, empty=True)
+            await self._finish_market_check(row, channels, deal_count=0, empty=True)
             log.info(
                 "Market watch %s (%s): %s/%s comparable across %s variant(s), "
                 "none with the %s needed to price — holding",
@@ -1104,7 +1110,7 @@ class EbaySpyService:
         first_check = not self.store.market_watch_has_successful_check(watch_id)
         sent_count = 0
         # Drain at most a handful of deals per tick so a backlog (common on the
-        # very first check) never floods the chat in one burst.
+        # very first check) never floods the channel in one burst.
         home_country = self._home_country()
         for deal in candidates[: self.config.market_max_deals_per_cycle]:
             item, price, variant = deal.item, deal.price, deal.variant
@@ -1145,8 +1151,8 @@ class EbaySpyService:
                 self.config.market_resale_fee_percent,
                 self.config.market_resale_fee_fixed * (lot_qty or 1),
             )
-            sent = await self._notify_deal_chats(
-                chats,
+            sent = await self._notify_deal_channels(
+                channels,
                 item,
                 market_price=price,
                 discount_percent=actual_discount,
@@ -1168,14 +1174,14 @@ class EbaySpyService:
             )
             if sent:
                 # Only mark the deal as alerted once it has actually been
-                # delivered to at least one chat; otherwise a transient Telegram
+                # delivered to at least one channel; otherwise a transient Discord
                 # failure would permanently suppress a real below-market deal.
                 self.store.record_deal_alert(
                     watch_id, item.item_id, item.total_price, variant=variant,
                     title=item.title, stage=stage,
                 )
                 sent_count += 1
-        await self._finish_market_check(row, chats, deal_count=sent_count)
+        await self._finish_market_check(row, channels, deal_count=sent_count)
         log.info(
             "Market watch %s (%s): %s/%s comparable across %s priced variant(s)%s, "
             "%s deals alerted%s",
@@ -1190,9 +1196,9 @@ class EbaySpyService:
         )
         return sent_count
 
-    async def _notify_deal_chats(
+    async def _notify_deal_channels(
         self,
-        chats: list[str],
+        channels: list[str],
         item: MarketItem,
         *,
         market_price: float,
@@ -1214,10 +1220,10 @@ class EbaySpyService:
         offer_estimate: float | None = None,
     ) -> bool:
         sent_any = False
-        for chat_id in chats:
+        for channel_id in channels:
             try:
-                await self.telegram.notify_deal(
-                    chat_id,
+                await self.discord.notify_deal(
+                    channel_id,
                     item,
                     market_price=market_price,
                     discount_percent=discount_percent,
@@ -1239,11 +1245,11 @@ class EbaySpyService:
                 )
                 sent_any = True
             except Exception:
-                log.exception("Failed sending Telegram deal alert to chat %s", chat_id)
+                log.exception("Failed sending Discord deal alert to channel %s", channel_id)
         return sent_any
 
     async def _detect_username_change(
-        self, watched_seller: str, listings: list[Listing], chats: list[str]
+        self, watched_seller: str, listings: list[Listing], channels: list[str]
     ) -> str | None:
         observed = self._observed_changed_seller(watched_seller, listings)
         if not observed and not listings:
@@ -1256,7 +1262,7 @@ class EbaySpyService:
             notice_key = f"seller_rename_notice:{watched_seller.lower()}:{observed.lower()}"
             if not self.store.get_meta(notice_key):
                 await self._notify_text(
-                    chats,
+                    channels,
                     (
                         "Possible eBay username change detected.\n"
                         f"Updated watchlist: {watched_seller} -> {observed}"
@@ -1288,77 +1294,77 @@ class EbaySpyService:
                 observed.add(current_seller)
         return sorted(observed, key=str.lower)[0] if len(observed) == 1 else None
 
-    async def _notify_text(self, chats: list[str], text: str) -> None:
-        for chat_id in chats:
+    async def _notify_text(self, channels: list[str], text: str) -> None:
+        for channel_id in channels:
             try:
-                await self.telegram.send_message(chat_id, text, disable_preview=True)
+                await self.discord.send_message(channel_id, text)
             except Exception:
-                log.exception("Failed sending Telegram text alert to chat %s", chat_id)
+                log.exception("Failed sending Discord text alert to channel %s", channel_id)
 
-    async def _notify_chats(self, chats: list[str], listing: Listing) -> bool:
+    async def _notify_channels(self, channels: list[str], listing: Listing) -> bool:
         sent_any = False
-        for chat_id in chats:
+        for channel_id in channels:
             try:
-                await self.telegram.notify_listing(chat_id, listing)
+                await self.discord.notify_listing(channel_id, listing)
                 sent_any = True
             except Exception:
-                log.exception("Failed sending Telegram alert to chat %s", chat_id)
+                log.exception("Failed sending Discord alert to channel %s", channel_id)
         return sent_any
 
-    async def _notify_ended_chats(
-        self, chats: list[str], listing: Listing, ended_at: str | None = None
+    async def _notify_ended_channels(
+        self, channels: list[str], listing: Listing, ended_at: str | None = None
     ) -> bool:
         sent_any = False
-        for chat_id in chats:
+        for channel_id in channels:
             try:
-                await self.telegram.notify_ended_listing(chat_id, listing, ended_at)
+                await self.discord.notify_ended_listing(channel_id, listing, ended_at)
                 sent_any = True
             except Exception:
-                log.exception("Failed sending Telegram ended alert to chat %s", chat_id)
+                log.exception("Failed sending Discord ended alert to channel %s", channel_id)
         return sent_any
 
-    async def _notify_quantity_increase_chats(
-        self, chats: list[str], listing: Listing, previous_quantity: int, current_quantity: int
+    async def _notify_quantity_increase_channels(
+        self, channels: list[str], listing: Listing, previous_quantity: int, current_quantity: int
     ) -> bool:
         sent_any = False
-        for chat_id in chats:
+        for channel_id in channels:
             try:
-                await self.telegram.notify_quantity_increase(
-                    chat_id, listing, previous_quantity, current_quantity
+                await self.discord.notify_quantity_increase(
+                    channel_id, listing, previous_quantity, current_quantity
                 )
                 sent_any = True
             except Exception:
-                log.exception("Failed sending Telegram quantity alert to chat %s", chat_id)
+                log.exception("Failed sending Discord quantity alert to channel %s", channel_id)
         return sent_any
 
-    async def _notify_price_drop_chats(
-        self, chats: list[str], listing: Listing, old_price: float, new_price: float, pct: float
+    async def _notify_price_drop_channels(
+        self, channels: list[str], listing: Listing, old_price: float, new_price: float, pct: float
     ) -> bool:
         sent_any = False
-        for chat_id in chats:
+        for channel_id in channels:
             try:
-                await self.telegram.notify_price_drop(chat_id, listing, old_price, new_price, pct)
+                await self.discord.notify_price_drop(channel_id, listing, old_price, new_price, pct)
                 sent_any = True
             except Exception:
-                log.exception("Failed sending Telegram price-drop alert to chat %s", chat_id)
+                log.exception("Failed sending Discord price-drop alert to channel %s", channel_id)
         return sent_any
 
     def status_text(self) -> str:
         return format_status_rows(self.store.status_rows())
 
     async def handle_command(
-        self, chat_id: str, username: str | None, command: str, arg: str
+        self, channel_id: str, username: str | None, command: str, arg: str
     ) -> str:
-        if not self.is_authorized_chat(chat_id, username):
+        if not self.is_authorized_channel(channel_id, username):
             log.warning(
-                "Rejected Telegram command %s from unauthorized chat %s username %s",
+                "Rejected Discord command %s from unauthorized channel %s username %s",
                 command,
-                chat_id,
+                channel_id,
                 username or "",
             )
             return "This bot is invite-only."
         if command in {"/start", "/help"}:
-            self.store.add_chat(chat_id, username)
+            self.store.add_channel(channel_id, username)
             return (
                 "ebayspy is connected.\n"
                 "\n"
@@ -1388,42 +1394,44 @@ class EbaySpyService:
                 "/watch airpods pro lots:on exclude:case — job lots, drops \"case\"\n"
                 "\n"
                 "Manage: /watches · /unwatch <id> · /demand <id> · /refimage <id> <url>\n"
-                "Tip: in /watches, /list and /observing, tap 🗑 next to a row to "
+                "Tip: in /watches, /list and /observing, click 🗑 next to a row to "
                 "remove it — no need to type the id or name.\n"
                 "📷 Deals are matched against the item's stock photo to drop wrong items; "
                 "/refimage <id> <url> pins that photo, /refimage <id> clear reverts to auto.\n"
-                "Under a deal, tap to mute a variant, flag a wrong match, or rate 👍/👎 "
+                "Under a deal, click to mute a variant, flag a wrong match, or rate 👍/👎 "
                 "(👎 raises the discount bar, 👍 relaxes it).\n"
+                "Slash commands take their text in the single “args” box (e.g. /watch → "
+                "args: dyson airblade hu02 under:400); typing !watch … as a message works too.\n"
                 "\n"
                 "ADMIN: /invite @user · /uninvite @user · /invites"
             )
         if command == "/invite":
-            if not self.is_admin_chat(chat_id, username):
+            if not self.is_admin_channel(channel_id, username):
                 return "Only an admin can invite users."
             if not arg:
                 return "Usage: /invite @username"
-            invited = normalize_telegram_username(arg.split()[0])
-            if not is_valid_telegram_username(invited):
-                return "That does not look like a valid Telegram username."
+            invited = normalize_discord_username(arg.split()[0])
+            if not is_valid_discord_username(invited):
+                return "That does not look like a valid Discord username."
             added = self.store.add_allowed_username(invited)
             return f"Invited @{invited}." if added else f"@{invited} was already invited."
         if command == "/uninvite":
-            if not self.is_admin_chat(chat_id, username):
+            if not self.is_admin_channel(channel_id, username):
                 return "Only an admin can remove invites."
             if not arg:
                 return "Usage: /uninvite @username"
-            removed_username = normalize_telegram_username(arg.split()[0])
-            if not is_valid_telegram_username(removed_username):
-                return "That does not look like a valid Telegram username."
-            if removed_username in self.config.telegram_allowed_usernames:
-                return f"@{removed_username} is a configured admin and cannot be removed from chat."
+            removed_username = normalize_discord_username(arg.split()[0])
+            if not is_valid_discord_username(removed_username):
+                return "That does not look like a valid Discord username."
+            if removed_username in self.config.discord_allowed_usernames:
+                return f"@{removed_username} is a configured admin and cannot be uninvited."
             removed = self.store.remove_allowed_username(removed_username)
             return f"Removed @{removed_username}." if removed else f"@{removed_username} was not invited."
         if command == "/invites":
-            if not self.is_admin_chat(chat_id, username):
+            if not self.is_admin_channel(channel_id, username):
                 return "Only an admin can list invites."
             dynamic = self.store.list_allowed_usernames()
-            admins = sorted(self.config.telegram_allowed_usernames)
+            admins = sorted(self.config.discord_allowed_usernames)
             lines = []
             if admins:
                 lines.append("Admins: " + ", ".join(f"@{name}" for name in admins))
@@ -1467,7 +1475,7 @@ class EbaySpyService:
                 return "I could not verify that seller with eBay right now. Try again in a minute."
             if exists is None:
                 log.warning("Adding eBay seller %s without external existence confirmation", seller)
-            self.store.add_chat(chat_id, username)
+            self.store.add_channel(channel_id, username)
             added = self.store.add_seller(seller, min_price)
             if not added:
                 return f"Already watching seller: {seller}"
@@ -1489,7 +1497,7 @@ class EbaySpyService:
             removed = self.store.remove_seller(arg.split()[0])
             return "Removed." if removed else "Seller was not in the watchlist."
         if command == "/list":
-            return await self._send_table(chat_id, *self._sellers_view())
+            return await self._send_table(channel_id, *self._sellers_view())
         if command == "/floor":
             return self._handle_floor(arg)
         if command == "/status":
@@ -1497,22 +1505,22 @@ class EbaySpyService:
         if command == "/health":
             return self.health_text()
         if command == "/check":
-            self.store.add_chat(chat_id, username)
+            self.store.add_channel(channel_id, username)
             count = await self.check_once()
             return f"Check complete. Alerts sent: {count}"
         if command == "/observe":
-            return await self._handle_observe(chat_id, username, arg)
+            return await self._handle_observe(channel_id, username, arg)
         if command == "/unobserve":
             if not arg:
                 return "Usage: /unobserve sellername"
             removed = self.store.remove_observed_seller(arg.split()[0])
             return "Stopped observing." if removed else "Seller was not on the observe list."
         if command == "/observing":
-            return await self._send_table(chat_id, *self._observing_view())
+            return await self._send_table(channel_id, *self._observing_view())
         if command == "/interval":
             return self._handle_interval(arg)
         if command == "/watch":
-            return await self._handle_watch(chat_id, username, arg)
+            return await self._handle_watch(channel_id, username, arg)
         if command == "/unwatch":
             return self._handle_unwatch(arg)
         if command == "/demand":
@@ -1527,16 +1535,16 @@ class EbaySpyService:
         if command == "/refimage":
             return self._handle_refimage(arg)
         if command == "/watches":
-            return await self._send_table(chat_id, *self._watches_view())
+            return await self._send_table(channel_id, *self._watches_view())
         return "Unknown command. Try /help"
 
-    # ----- tappable management lists ------------------------------------------
+    # ----- clickable management lists -----------------------------------------
     # /watches, /list and /observing render their text plus a 🗑 button per row,
-    # so anything can be removed with a tap instead of retyping its id/name. Each
-    # button's callback_data carries the action and the row key; handle_callback
+    # so anything can be removed with a click instead of retyping its id/name.
+    # Each button's custom_id carries the action and the row key; handle_callback
     # removes the row and edits the message in place so the list stays current.
 
-    def _watches_view(self) -> tuple[str, list[dict]]:
+    def _watches_view(self) -> tuple[str, list[Button]]:
         rows = self.store.list_market_watches()
         trends = {
             row["id"]: self._price_trend_text(row["id"], row["market_variant"] or "")
@@ -1554,7 +1562,7 @@ class EbaySpyService:
         ]
         return text, [button for button in buttons if button]
 
-    def _sellers_view(self) -> tuple[str, list[dict]]:
+    def _sellers_view(self) -> tuple[str, list[Button]]:
         rows = self.store.list_seller_rows()
         text = format_seller_rows(rows)
         buttons = [
@@ -1563,7 +1571,7 @@ class EbaySpyService:
         ]
         return text, [button for button in buttons if button]
 
-    def _observing_view(self) -> tuple[str, list[dict]]:
+    def _observing_view(self) -> tuple[str, list[Button]]:
         rows = self.store.list_observed_sellers()
         text = format_observed_rows(rows, self.config.observe_interval_seconds)
         buttons = [
@@ -1573,57 +1581,52 @@ class EbaySpyService:
         return text, [button for button in buttons if button]
 
     @staticmethod
-    def _remove_button(label: str, data: str) -> dict | None:
-        """An inline button, or None when its callback_data won't fit Telegram's
-        64-byte cap (only a pathologically long eBay username could overflow)."""
-        if len(data.encode("utf-8")) > 64:
+    def _remove_button(label: str, data: str) -> Button | None:
+        """A 🗑 button, or None when its custom_id won't fit Discord's 100-char
+        cap (only a pathologically long eBay username could overflow)."""
+        if len(data) > _CUSTOM_ID_LIMIT:
             return None
-        return {"text": label[:60], "callback_data": data}
+        return Button(label, custom_id=data, style="danger")
 
     @staticmethod
-    def _table_markup(buttons: list[dict]) -> dict:
-        """One button per row, capped. An empty keyboard clears the buttons on
-        edit when the last row is removed."""
-        return {"inline_keyboard": [[button] for button in buttons[:_MAX_TABLE_BUTTONS]]}
+    def _table_buttons(buttons: list[Button]) -> ButtonRows:
+        """Pack the buttons into Discord's 5-per-row grid, capped. An empty list
+        clears the buttons on edit when the last row is removed."""
+        capped = buttons[:_MAX_TABLE_BUTTONS]
+        return [capped[i : i + _BUTTONS_PER_ROW] for i in range(0, len(capped), _BUTTONS_PER_ROW)]
 
-    async def _send_table(self, chat_id: str, text: str, buttons: list[dict]) -> str:
+    async def _send_table(self, channel_id: str, text: str, buttons: list[Button]) -> str:
         """Send a managed list with its remove buttons; returns "" so the command
         loop doesn't also send the text as a plain (button-less) reply."""
-        markup = self._table_markup(buttons) if buttons else None
-        await self.telegram.send_message(
-            chat_id, html.escape(text), disable_preview=True, reply_markup=markup
-        )
+        rows = self._table_buttons(buttons) if buttons else None
+        await self.discord.send_message(channel_id, text, buttons=rows)
         return ""
 
     async def _refresh_table(
-        self, chat_id: str, message_id: int | None, view: tuple[str, list[dict]]
+        self, channel_id: str, message_id: int | None, view: tuple[str, list[Button]]
     ) -> None:
-        """Re-render a managed list in place after a removal so the tapped row
+        """Re-render a managed list in place after a removal so the clicked row
         disappears. Best-effort: a failed edit just leaves the toast feedback."""
         if not message_id:
             return
         text, buttons = view
         try:
-            await self.telegram.edit_message(
-                chat_id,
-                message_id,
-                html.escape(text),
-                reply_markup=self._table_markup(buttons),
-                disable_preview=True,
+            await self.discord.edit_message(
+                channel_id, message_id, text, buttons=self._table_buttons(buttons)
             )
         except Exception:
             log.debug("Could not refresh managed list after removal", exc_info=True)
 
     async def handle_callback(
-        self, chat_id: str, username: str | None, data: str, message_id: int | None = None
+        self, channel_id: str, username: str | None, data: str, message_id: int | None = None
     ) -> str:
-        """Handle an inline-button tap on a deal alert or a managed list."""
-        if not self.is_authorized_chat(chat_id, username):
+        """Handle a button click on a deal alert or a managed list."""
+        if not self.is_authorized_channel(channel_id, username):
             return "Not authorized."
         action, _, rest = data.partition(":")
         # One-tap removals from /watches, /list, /observing tables.
         if action in ("uw", "rs", "ro"):
-            return await self._callback_remove(chat_id, message_id, action, rest)
+            return await self._callback_remove(channel_id, message_id, action, rest)
         watch_str, _, item_id = rest.partition(":")
         if not watch_str.isdigit() or not item_id:
             return ""
@@ -1671,7 +1674,7 @@ class EbaySpyService:
         return ""
 
     async def _callback_remove(
-        self, chat_id: str, message_id: int | None, action: str, key: str
+        self, channel_id: str, message_id: int | None, action: str, key: str
     ) -> str:
         """Remove the row a 🗑 button addresses, then refresh the list in place."""
         if action == "uw":
@@ -1688,7 +1691,7 @@ class EbaySpyService:
             removed = self.store.remove_observed_seller(key)
             toast = f"Stopped observing {key}." if removed else "Already removed."
             view = self._observing_view()
-        await self._refresh_table(chat_id, message_id, view)
+        await self._refresh_table(channel_id, message_id, view)
         return toast
 
     def _learn_exclude_from_item(self, watch_id: int, item_id: str, query: str) -> str | None:
@@ -1716,7 +1719,7 @@ class EbaySpyService:
         term = max(candidates, key=len)
         return term if self.store.append_exclude_term(watch_id, term) else None
 
-    async def _handle_watch(self, chat_id: str, username: str | None, arg: str) -> str:
+    async def _handle_watch(self, channel_id: str, username: str | None, arg: str) -> str:
         if not arg.strip():
             return (
                 "Usage: /watch <search terms> [condition:new|used] [under:PRICE] "
@@ -1787,7 +1790,7 @@ class EbaySpyService:
             return "Give me something to search for, e.g. /watch dyson airblade hu02"
         if self.store.has_market_watch(query, condition):
             return f"Already watching the market for: {query}"
-        self.store.add_chat(chat_id, username)
+        self.store.add_channel(channel_id, username)
         exclude_terms = ", ".join(dict.fromkeys(excludes)) or None
         watch_id = self.store.add_market_watch(
             query,
@@ -1799,7 +1802,7 @@ class EbaySpyService:
             category_id=category_id,
             include_auctions=include_auctions,
             markets=markets,
-            owner_chat_id=chat_id,
+            owner_chat_id=channel_id,
             include_lots=include_lots,
         )
         if watch_id is None:
@@ -1936,7 +1939,7 @@ class EbaySpyService:
             return None
         return price if price > 0 else None
 
-    async def _handle_observe(self, chat_id: str, username: str | None, arg: str) -> str:
+    async def _handle_observe(self, channel_id: str, username: str | None, arg: str) -> str:
         parts = arg.split()
         if not parts:
             return "Usage: /observe sellername [interval e.g. 3m] [minprice e.g. [100]]"
@@ -1976,7 +1979,7 @@ class EbaySpyService:
         except Exception:
             log.warning("Could not validate eBay seller %s for observe", seller)
             return "I could not verify that seller with eBay right now. Try again in a minute."
-        self.store.add_chat(chat_id, username)
+        self.store.add_channel(channel_id, username)
         if not self.store.add_observed_seller(seller, interval, min_price):
             return f"Already observing seller: {seller}"
         baseline_count = await self._seed_observe_baseline(seller)

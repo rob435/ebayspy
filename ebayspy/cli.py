@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("run", help="Run the Telegram tracker (watch + observe loops)")
+    subparsers.add_parser("run", help="Run the Discord tracker (watch + observe loops)")
     subparsers.add_parser("check", help="Run one watch-list poll immediately")
     subparsers.add_parser(
         "wakepoll", help="One poll, then arm the next wake (run by the wakepoll LaunchAgent)"
@@ -151,6 +151,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("discord").setLevel(logging.WARNING)
     config = Config.load()
 
     if args.command == "run":
